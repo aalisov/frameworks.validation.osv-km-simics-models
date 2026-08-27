@@ -11,7 +11,25 @@ Each module ships **`board_hooks.py`** — the supported way to instantiate and 
 
 Validated with supersmasher `sample-vsip-memsrc-km.cfg` → **PASS** on KM OSBV Simics (SMP+SVE).
 
-## Use in km-hps
+## Install into a Simics project (new Simics / fresh km-hps)
+
+```bash
+git clone https://github.com/aalisov/frameworks.validation.osv-km-simics-models.git
+cd frameworks.validation.osv-km-simics-models
+./setup-into-simics-project.sh                  # → ~/km-hps by default
+# or:
+./setup-into-simics-project.sh -p /path/to/simics-project --force
+```
+
+The script:
+
+1. Symlinks (or `--copy`) `vsip-memsrc` and `p3t1755` into `PROJECT/modules/`
+2. Sources `set_simics_env_main.sh` when present
+3. Builds the modules (`make`)
+
+Useful flags: `--force` (replace existing), `--copy`, `--no-build`, `--env-script FILE`.
+
+## Use in km-hps (manual)
 
 ```bash
 cd ~/km-hps

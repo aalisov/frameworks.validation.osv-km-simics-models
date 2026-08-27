@@ -1,0 +1,407 @@
+/*
+ * Minimal NXP P3T1755-like I3C/I2C temperature sensor target for KM Simics.
+ * Register map (pointer + Temp/Conf/TLOW/THIGH) only — no IBI alerts.
+ *
+ * Linux lm75 I3C id: manuf 0x011b part 0x152a  (compatible nxp,p3t1755)
+ */
+
+dml 1.4;
+
+device p3t1755;
+param classname = "p3t1755";
+
+param documentation =
+    "Minimal P3T1755-compatible I3C temperature sensor (Temp/Conf/TLOW/THIGH).";
+param desc = "P3T1755 temp sensor (minimal)";
+
+import "simics/devs/i3c.dml";
+import "utility.dml";
+
+param INVALID_ADDRESS = 0xFF;
+param INVALID_COMMAND = 0x1FF;
+
+param St_Idle        = 0;
+param St_IBI         = 1;
+param St_I2C_Read    = 2;
+param St_I2C_Write   = 3;
+param St_I3C_Read    = 4;
+param St_I3C_Write   = 5;
+param St_I3C_Cmd     = 6;
+param St_Wait_DA     = 7;
+param St_Listening   = 8;
+
+param CCC_DISEC  = 0x01;
+param CCC_RSTDAA = 0x06;
+param CCC_ENTDAA = 0x07;
+param CCC_GETMWL = 0x8B;
+param CCC_GETMRL = 0x8C;
+param CCC_GETPID = 0x8D;
+param CCC_GETBCR = 0x8E;
+param CCC_GETDCR = 0x8F;
+param CCC_SETDASA = 0x87;
+
+/* I3C slave BCR; DCR 0x63 = temperature sensor (MIPI / P3T1755) */
+param BCR = 0x00;
+param DCR_TEMP_SENSOR = 0x63;
+
+/* PID matches DT sensor@0,236152A0090 and I3C_DEVICE(0x11B, 0x152a) +
+ * extra/board ID 0x090 (instance 0). Alternate part 0x1529 also in driver. */
+param DEFAULT_PID = 0x236152a0090;
+/* DT overlay uses reg=<0x0 ...> — no static I2C address */
+param DEFAULT_STATIC_ADDR = 0xFF;
+
+/* Defaults: Temp 25 C, Conf 0x28, TLOW 75 C, THIGH 80 C */
+param DEFAULT_TEMP = 0x1900;
+param DEFAULT_CONF = 0x28;
+param DEFAULT_TLOW = 0x4B00;
+param DEFAULT_THIGH = 0x5000;
+
+connect bus {
+    param documentation = "Connect to I3C bus";
+    param configuration = "optional";
+    interface i3c_master;
+}
+
+attribute provisional_id is uint64_attr {
+    param documentation = "48-bit Provisioned ID (Linux matches manuf/part)";
+}
+
+attribute static_address is uint64_attr {
+    param documentation = "7-bit static/I2C address (0xff disables)";
+}
+
+attribute dcr is uint64_attr {
+    param documentation = "Device Characteristic Register";
+}
+
+attribute temperature_c is (int64_attr) {
+    param documentation =
+        "Simulated temperature in whole Celsius (updates Temp register).";
+    method set(attr_value_t value) throws {
+        default(value);
+        local int64 raw = this.val * 16; /* / 0.0625 */
+        if (raw > 2047)
+            raw = 2047;
+        if (raw < -2048)
+            raw = -2048;
+        temp_reg = cast(raw, uint16) << 4;
+    }
+}
+
+saved uint9 command;
+saved uint8 dynamic_address;
+saved uint4 i3c_status;
+
+saved uint8 pointer;
+saved uint8 write_phase;   /* 0 = expect pointer, 1+ = data bytes */
+saved uint8 write_byte_idx;
+
+saved uint16 temp_reg;
+saved uint8 conf_reg;
+saved uint16 tlow_reg;
+saved uint16 thigh_reg;
+
+saved uint8 read_buf[2];
+saved uint8 read_len;
+saved uint8 read_idx;
+
+template sample_fifo {
+    param fifo_size;
+    saved uint32 tail;
+    saved uint32 len;
+    #if (true) {
+        saved uint8 fifo_buf[fifo_size];
+    }
+
+    method push(uint8 value) throws default {
+        if (len >= fifo_size) throw;
+        fifo_buf[tail + len++ % fifo_size] = value;
+    }
+
+    method pop() -> (uint8) throws default {
+        if (len == 0) throw;
+        local uint8 value = fifo_buf[tail];
+        tail = (tail + 1) % fifo_size;
+        --len;
+        return value;
+    }
+    method clear() { len = 0; }
+    method is_empty() -> (bool) { return len == 0; }
+}
+
+group ccc_fifo {
+    is sample_fifo;
+    param fifo_size = 16;
+
+    method get_data() -> (uint8) {
+        try {
+            return pop();
+        } catch {
+            return 0;
+        }
+    }
+
+    method store_data(uint8 byte) {
+        try {
+            this.push(byte);
+        } catch {}
+    }
+}
+
+method prepare_read() {
+    read_idx = 0;
+    switch (pointer & 0x3) {
+    case 0:
+        read_buf[0] = (temp_reg >> 8) & 0xFF;
+        read_buf[1] = temp_reg & 0xFF;
+        read_len = 2;
+        break;
+    case 1:
+        read_buf[0] = conf_reg;
+        read_len = 1;
+        break;
+    case 2:
+        read_buf[0] = (tlow_reg >> 8) & 0xFF;
+        read_buf[1] = tlow_reg & 0xFF;
+        read_len = 2;
+        break;
+    case 3:
+        read_buf[0] = (thigh_reg >> 8) & 0xFF;
+        read_buf[1] = thigh_reg & 0xFF;
+        read_len = 2;
+        break;
+    }
+}
+
+method get_reg_byte() -> (uint8) {
+    if (read_idx >= read_len)
+        return 0;
+    return read_buf[read_idx++];
+}
+
+method apply_write_byte(uint8 data) {
+    if (write_phase == 0) {
+        pointer = data & 0x3;
+        write_phase = 1;
+        write_byte_idx = 0;
+        log info, 3: "P3T1755 pointer -> 0x%x", pointer;
+        return;
+    }
+
+    switch (pointer & 0x3) {
+    case 0:
+        /* Temp is read-only — ignore data bytes */
+        break;
+    case 1:
+        conf_reg = data;
+        log info, 3: "P3T1755 Conf = 0x%02x", conf_reg;
+        break;
+    case 2:
+        if (write_byte_idx == 0)
+            tlow_reg = (tlow_reg & 0x00FF) | (cast(data, uint16) << 8);
+        else
+            tlow_reg = (tlow_reg & 0xFF00) | data;
+        write_byte_idx++;
+        break;
+    case 3:
+        if (write_byte_idx == 0)
+            thigh_reg = (thigh_reg & 0x00FF) | (cast(data, uint16) << 8);
+        else
+            thigh_reg = (thigh_reg & 0xFF00) | data;
+        write_byte_idx++;
+        break;
+    }
+}
+
+method begin_private_write() {
+    write_phase = 0;
+    write_byte_idx = 0;
+}
+
+implement i3c_slave {
+    method ibi_start() {
+        bus.i3c_master.ibi_address(INVALID_ADDRESS);
+    }
+
+    method ibi_acknowledge(i3c_ack_t ack) {
+        i3c_status = St_Listening;
+    }
+
+    method start(uint8 address) {
+        local uint8 addr = address >> 1;
+        local bool read = (address & 1) != 0;
+        local bool ack = true;
+
+        log info, 4: "start addr=0x%x %s", addr, read ? "R" : "W";
+        if (match_address(static_address.val, addr)) {
+            if (!read && command == CCC_SETDASA)
+                i3c_status = St_I3C_Write;
+            else if (read) {
+                i3c_status = St_I2C_Read;
+                prepare_read();
+            } else {
+                i3c_status = St_I2C_Write;
+                begin_private_write();
+            }
+        } else if (match_address(dynamic_address, addr)) {
+            if (read) {
+                i3c_status = St_I3C_Read;
+                prepare_read();
+            } else {
+                i3c_status = St_I3C_Write;
+                begin_private_write();
+            }
+        } else if (addr == 0x7e) {
+            if (!read) {
+                command = INVALID_COMMAND;
+                i3c_status = St_I3C_Cmd;
+            } else if (command == CCC_ENTDAA
+                       && dynamic_address != INVALID_ADDRESS) {
+                ack = false;
+                i3c_status = St_Listening;
+            } else {
+                if (command != CCC_ENTDAA)
+                    ack = false;
+                i3c_status = ack ? St_I3C_Read : St_Listening;
+            }
+        } else {
+            i3c_status = St_Listening;
+            ack = false;
+        }
+        acknowledge(ack ? I3C_ack : I3C_noack);
+    }
+
+    method write(uint8 data) {
+        local i3c_ack_t ack = I3C_noack;
+        if (i3c_status == St_I2C_Write) {
+            apply_write_byte(data);
+            ack = I3C_ack;
+        } else if (i3c_status == St_Wait_DA) {
+            dynamic_address = data >> 1;
+            log info, 3: "New dynamic address 0x%02x", dynamic_address;
+            ack = I3C_ack;
+        } else {
+            log spec_viol, 1: "Unexpected I2C write";
+        }
+        acknowledge(ack);
+    }
+
+    method sdr_write(bytes_t buf) {
+        log info, 4: "sdr_write len=%zd st=%d", buf.len, i3c_status;
+        if (i3c_status == St_I3C_Cmd || i3c_status == St_I3C_Write) {
+            local int i;
+            for (i = 0; i < buf.len; i++) {
+                if (i3c_status == St_I3C_Cmd) {
+                    command = buf.data[i];
+                    i3c_status = St_I3C_Write;
+                    handle_ccc(command);
+                } else if (i3c_status == St_I3C_Write
+                           && command == CCC_SETDASA) {
+                    dynamic_address = buf.data[0] >> 1;
+                    log info, 3: "SETDASA dyn=0x%02x", dynamic_address;
+                } else if (i3c_status == St_I3C_Write
+                           && command == INVALID_COMMAND) {
+                    apply_write_byte(buf.data[i]);
+                } else {
+                    /* ignore unexpected CCC payload bytes */
+                }
+            }
+        } else {
+            log spec_viol: "Unexpected i3c write, st=%d", i3c_status;
+        }
+    }
+
+    method read() {
+        if (i3c_status == St_I2C_Read) {
+            local uint8 data = get_reg_byte();
+            read_response(data, read_idx < read_len);
+        } else if (i3c_status == St_I3C_Read) {
+            if (command != INVALID_COMMAND && command != CCC_ENTDAA) {
+                local uint8 data = ccc_fifo.get_data();
+                read_response(data, !ccc_fifo.is_empty());
+            } else {
+                local uint8 data = get_reg_byte();
+                read_response(data, read_idx < read_len);
+            }
+        } else {
+            log spec_viol: "Unexpected read";
+        }
+    }
+
+    method daa_read() {
+        if (i3c_status == St_I3C_Read && command == CCC_ENTDAA) {
+            i3c_status = St_Wait_DA;
+            daa_response(provisional_id.val, BCR, dcr.val);
+        } else {
+            log spec_viol: "Unexpected DAA read";
+        }
+    }
+
+    method stop() {
+        i3c_status = St_Idle;
+        command = INVALID_COMMAND;
+        write_phase = 0;
+    }
+}
+
+method match_address(uint8 addr, uint8 recv) -> (bool) {
+    return (addr != INVALID_ADDRESS) && (addr == recv);
+}
+
+method acknowledge(i3c_ack_t ack) {
+    bus.i3c_master.acknowledge(ack);
+}
+
+method read_response(uint8 value, bool more) {
+    bus.i3c_master.read_response(value, more);
+}
+
+method daa_response(uint64 id, uint8 bcr, uint8 dcr) {
+    bus.i3c_master.daa_response(id, bcr, dcr);
+}
+
+method handle_ccc(uint8 ccc) {
+    ccc_fifo.clear();
+    switch (ccc) {
+    case CCC_RSTDAA:
+        dynamic_address = INVALID_ADDRESS;
+        break;
+    case CCC_GETMWL:
+    case CCC_GETMRL:
+        try {
+            ccc_fifo.push(8);
+            ccc_fifo.push(0);
+        } catch { }
+        break;
+    case CCC_GETBCR:
+        try { ccc_fifo.push(BCR); } catch { }
+        break;
+    case CCC_GETDCR:
+        try { ccc_fifo.push(dcr.val); } catch { }
+        break;
+    case CCC_GETPID:
+        local int i;
+        for (i = 0; i < 6; i++) {
+            try {
+                ccc_fifo.push((provisional_id.val >> ((5 - i) * 8)) & 0xFF);
+            } catch { }
+        }
+        break;
+    }
+}
+
+method init() {
+    provisional_id.val = DEFAULT_PID;
+    static_address.val = DEFAULT_STATIC_ADDR;
+    dcr.val = DCR_TEMP_SENSOR;
+    temperature_c.val = 25;
+    temp_reg = DEFAULT_TEMP;
+    conf_reg = DEFAULT_CONF;
+    tlow_reg = DEFAULT_TLOW;
+    thigh_reg = DEFAULT_THIGH;
+    pointer = 0;
+    write_phase = 0;
+    dynamic_address = INVALID_ADDRESS;
+    command = INVALID_COMMAND;
+    i3c_status = St_Idle;
+}

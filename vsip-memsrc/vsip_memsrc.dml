@@ -1,0 +1,398 @@
+/*
+ * VSIP memory traffic generator (mem_source) — functional Simics model.
+ *
+ * Register map matches supersmasher vsipmemsrc.h / OSBV DT overlay layout:
+ *   control @ +0x00000, vectors @ +0x10000, errors @ +0x20000
+ *
+ * AXI4 master (F2) behaviour is emulated via memory transactions on f2_mem.
+ */
+
+dml 1.4;
+
+device vsip_memsrc;
+param classname = "vsip_memsrc";
+param desc = "VSIP memory traffic generator (mem_source)";
+param documentation =
+    "Functional model of the VSIP mem_source RTL block: scripted AXI master "
+    + "with AXI4-Lite control, vector table, and error log banks.";
+
+import "utility.dml";
+import "simics/devs/memory-space.dml";
+
+constant REG_DW = 4;
+constant NUM_V = 256;
+constant VEC_BYTES = 128;
+constant VEC_DWS = VEC_BYTES / REG_DW;
+constant ERR_DEPTH = 32;
+constant ERR_TOTAL = ERR_DEPTH * 2;
+
+constant CONF_RUN        = 1 << 0;
+constant CONF_ERR        = 1 << 1;
+constant CONF_STOP       = 1 << 2;
+constant CONF_LOOP       = 1 << 3;
+constant CONF_SEQUENTIAL = 1 << 4;
+
+constant OPREAD  = 0;
+constant OPWRITE = 1;
+constant OPRDmWR = 2;
+
+connect f2_mem is map_target {
+    param documentation = "AXI master target memory space (F2 / soc2fpga)";
+    param configuration = "optional";
+}
+
+saved bool running;
+saved bool test_done;
+saved bool end_of_array;
+saved bool errored;
+
+saved uint32 delay_cycles;
+saved uint32 num_vectors;
+saved uint32 max_rd_requests;
+saved uint32 max_wr_requests;
+saved uint32 cur_index;
+saved uint32 transaction_timeout;
+saved uint32 axi_id_reg;
+saved uint32 loop_count;
+saved uint32 num_loops;
+saved uint32 config_reg;
+saved uint32 burst_reg;
+saved uint32 dwvecsize;
+
+saved uint32 pv_cycle_cnt;
+saved uint32 pv_arvalid_cnt;
+saved uint32 pv_rvalid_cnt;
+saved uint32 pv_awvalid_cnt;
+saved uint32 pv_wvalid_cnt;
+saved uint32 pv_max_read_lat;
+saved uint32 pv_max_write_lat;
+
+saved uint32 vec_storage[NUM_V * VEC_DWS];
+saved uint32 err_storage[ERR_TOTAL];
+
+method status_value() -> (uint32) {
+    local uint32 magic = 0x123 << 4;
+    return magic
+        | (test_done ? 1 << 3 : 0)
+        | (end_of_array ? 1 << 2 : 0)
+        | (errored ? 1 << 1 : 0)
+        | (running ? 1 << 0 : 0);
+}
+
+method vec_base(int idx) -> (int) {
+    return idx * VEC_DWS;
+}
+
+method vec_get(int idx, int dw_off) -> (uint32) {
+    return vec_storage[vec_base(idx) + dw_off];
+}
+
+method vec_set(int idx, int dw_off, uint32 val) {
+    vec_storage[vec_base(idx) + dw_off] = val;
+}
+
+method log_error(int idx, bool is_write, uint8 code) {
+    local int slot = is_write ? ERR_DEPTH : 0;
+    local int i;
+    for (i = 0; i < ERR_DEPTH; i++) {
+        if ((err_storage[slot + i] & 0xffff0000) == 0) {
+            err_storage[slot + i] = (cast(code, uint32) << 8)
+                | cast(idx, uint32);
+            return;
+        }
+    }
+}
+
+method clear_errors() {
+    local int i;
+    for (i = 0; i < ERR_TOTAL; i++)
+        err_storage[i] = 0;
+}
+
+method beat_count() -> (int) {
+    /* One 256-bit (32-byte) beat per vector data chunk; default 1 beat. */
+    local int awlen = burst_reg & 0xffff;
+    return awlen + 1;
+}
+
+method vec_addr(int idx) -> (uint64) {
+    local uint64 lo = vec_get(idx, 16);
+    local uint64 hi = vec_get(idx, 17);
+    return (hi << 32) | lo;
+}
+
+method vec_opcode(int idx) -> (uint32) {
+    return vec_get(idx, 19);
+}
+
+method vec_len(int idx) -> (uint32) {
+    return vec_get(idx, 18);
+}
+
+method do_write_beat(uint64 addr, int idx) {
+    local int b;
+    local int beats = beat_count();
+    local uint8 buf[32];
+    /* One AW handshake per burst; one W handshake per beat. */
+    pv_awvalid_cnt++;
+    for (b = 0; b < beats; b++) {
+        local int base_dw = b * 8;
+        local int w;
+        for (w = 0; w < 8; w++) {
+            local uint32 v = vec_get(idx, base_dw + w);
+            buf[w * 4 + 0] = v & 0xff;
+            buf[w * 4 + 1] = (v >> 8) & 0xff;
+            buf[w * 4 + 2] = (v >> 16) & 0xff;
+            buf[w * 4 + 3] = (v >> 24) & 0xff;
+        }
+        pv_wvalid_cnt++;
+        try {
+            f2_mem.write_bytes(addr + cast(b * 32, uint64), 32, buf);
+        } catch {
+            if ((config_reg & CONF_ERR) != 0) {
+                errored = true;
+                log_error(idx, true, 1);
+            }
+        }
+    }
+}
+
+method do_read_beat(uint64 addr, int idx) {
+    local int b;
+    local int beats = beat_count();
+    local uint8 buf[32];
+    /* One AR handshake per burst; one R handshake per beat. */
+    pv_arvalid_cnt++;
+    for (b = 0; b < beats; b++) {
+        local int base_dw = b * 8;
+        local int w;
+        try {
+            f2_mem.read_bytes(addr + cast(b * 32, uint64), 32, buf);
+        } catch {
+            if ((config_reg & CONF_ERR) != 0) {
+                errored = true;
+                log_error(idx, false, 1);
+            }
+            return;
+        }
+        pv_rvalid_cnt++;
+        if ((config_reg & CONF_ERR) == 0)
+            continue;
+        for (w = 0; w < 8; w++) {
+            local uint32 expect = vec_get(idx, base_dw + w);
+            local uint32 got = buf[w * 4]
+                | (cast(buf[w * 4 + 1], uint32) << 8)
+                | (cast(buf[w * 4 + 2], uint32) << 16)
+                | (cast(buf[w * 4 + 3], uint32) << 24);
+            if (expect != got) {
+                errored = true;
+                log_error(idx, false, 2);
+            }
+        }
+    }
+}
+
+method run_vector(int idx) {
+    local uint64 addr = vec_addr(idx);
+    local uint32 op = vec_opcode(idx);
+    cur_index = cast(idx, uint32);
+    log info, 4: "VSIP memsrc vector %d op=%d addr=0x%x", idx, op, addr;
+    if (op == OPWRITE) {
+        do_write_beat(addr, idx);
+    } else if (op == OPREAD) {
+        do_read_beat(addr, idx);
+    } else if (op == OPRDmWR) {
+        do_read_beat(addr, idx);
+        do_write_beat(addr, idx);
+    }
+    pv_cycle_cnt += delay_cycles + 1;
+}
+
+method finish_run() {
+    running = false;
+    test_done = true;
+    end_of_array = true;
+    config_reg = config_reg & ~CONF_RUN;
+}
+
+method execute_vectors() {
+    local int loops = num_loops == 0 ? 1 : cast(num_loops, int);
+    local int loop;
+    local int v;
+    local int last = cast(num_vectors, int);
+
+    running = true;
+    test_done = false;
+    end_of_array = false;
+    errored = false;
+    loop_count = 0;
+    clear_errors();
+    pv_cycle_cnt = 0;
+    pv_arvalid_cnt = 0;
+    pv_rvalid_cnt = 0;
+    pv_awvalid_cnt = 0;
+    pv_wvalid_cnt = 0;
+    pv_max_read_lat = 0;
+    pv_max_write_lat = 0;
+
+    /*
+     * num_loops = how many times to walk the vector array.
+     * CONF_LOOP = infinite (supersmasher only sets it for infinite_loop=1);
+     * for finite runs the plugin still programs num_loops >= 1 without CONF_LOOP.
+     */
+    if ((config_reg & CONF_LOOP) != 0)
+        loops = 1000000;
+
+    for (loop = 0; loop < loops; loop++) {
+        for (v = 0; v <= last; v++)
+            run_vector(v);
+        loop_count = cast(loop + 1, uint32);
+        if ((config_reg & CONF_STOP) != 0 && errored)
+            break;
+    }
+    finish_run();
+}
+
+method on_config_write(uint32 val) {
+    local bool start = (val & CONF_RUN) != 0;
+    config_reg = val;
+    if (start && !running)
+        execute_vectors();
+}
+
+bank control {
+    param register_size = REG_DW;
+    param byte_order = "little-endian";
+
+    register status @ 0x00 is (read) "Status" {
+        method get() -> (uint64) { return status_value(); }
+    }
+    register deadbeef @ 0x04 is (read, write) "Unused / aclk_freq" {
+        method write(uint64 val) { default(val); }
+    }
+    register delay @ 0x08 is (read, write) "Inter-op delay" {
+        method write(uint64 val) { delay_cycles = val; default(val); }
+        method get() -> (uint64) { return delay_cycles; }
+    }
+    register num_vectors_r @ 0x0c is (read, write) {
+        method write(uint64 val) { num_vectors = val; default(val); }
+        method get() -> (uint64) { return num_vectors; }
+    }
+    register max_requests @ 0x10 is (read, write) {
+        method write(uint64 val) {
+            max_wr_requests = (val >> 16) & 0xffff;
+            max_rd_requests = val & 0xffff;
+            default(val);
+        }
+        method get() -> (uint64) {
+            return (cast(max_wr_requests, uint64) << 16) | max_rd_requests;
+        }
+    }
+    register current_index @ 0x14 is (read) {
+        method get() -> (uint64) { return cur_index; }
+    }
+    register transaction_timeout_r @ 0x18 is (read, write) {
+        method write(uint64 val) { transaction_timeout = val; default(val); }
+        method get() -> (uint64) { return transaction_timeout; }
+    }
+    register axi_id @ 0x1c is (read, write) {
+        method write(uint64 val) { axi_id_reg = val; default(val); }
+        method get() -> (uint64) { return axi_id_reg; }
+    }
+    register loop_count_r @ 0x20 is (read) "Loop counter" {
+        method get() -> (uint64) { return loop_count; }
+    }
+    register num_loops_r @ 0x24 is (read, write) {
+        method write(uint64 val) { num_loops = val; default(val); }
+        method get() -> (uint64) { return num_loops; }
+    }
+    register config @ 0x28 is (read, write) "Run control" {
+        method write(uint64 val) {
+            on_config_write(val);
+            default(val);
+        }
+        method get() -> (uint64) { return config_reg; }
+    }
+    register burst @ 0x2c is (read, write) {
+        method write(uint64 val) { burst_reg = val; default(val); }
+        method get() -> (uint64) { return burst_reg; }
+    }
+    register dwvecsize_r @ 0x30 is (read, write) {
+        method write(uint64 val) { dwvecsize = val; default(val); }
+        method get() -> (uint64) { return dwvecsize; }
+    }
+    register pv_cycle_cnt_r @ 0x34 is (read) {
+        method get() -> (uint64) { return pv_cycle_cnt; }
+    }
+    register pv_arvalid_cnt_r @ 0x38 is (read) {
+        method get() -> (uint64) { return pv_arvalid_cnt; }
+    }
+    register pv_rvalid_cnt_r @ 0x3c is (read) {
+        method get() -> (uint64) { return pv_rvalid_cnt; }
+    }
+    register pv_awvalid_cnt_r @ 0x40 is (read) {
+        method get() -> (uint64) { return pv_awvalid_cnt; }
+    }
+    register pv_wvalid_cnt_r @ 0x44 is (read) {
+        method get() -> (uint64) { return pv_wvalid_cnt; }
+    }
+    register pv_max_read_lat_r @ 0x48 is (read) {
+        method get() -> (uint64) { return pv_max_read_lat; }
+    }
+    register pv_max_write_lat_r @ 0x4c is (read) {
+        method get() -> (uint64) { return pv_max_write_lat; }
+    }
+}
+
+bank vectors {
+    param register_size = REG_DW;
+    param byte_order = "little-endian";
+
+    register vec_dw[i < NUM_V * VEC_DWS] @ (i * REG_DW) is (read, write) {
+        method write(uint64 val) {
+            vec_storage[i] = val;
+            default(val);
+        }
+        method get() -> (uint64) { return vec_storage[i]; }
+    }
+}
+
+bank errors {
+    param register_size = REG_DW;
+    param byte_order = "little-endian";
+
+    register err_dw[i < ERR_TOTAL] @ (i * REG_DW) is (read, write) {
+        method write(uint64 val) {
+            err_storage[i] = val;
+            default(val);
+        }
+        method get() -> (uint64) { return err_storage[i]; }
+    }
+}
+
+method init() {
+    running = false;
+    test_done = false;
+    end_of_array = false;
+    errored = false;
+    delay_cycles = 0;
+    num_vectors = 0;
+    max_rd_requests = 16;
+    max_wr_requests = 16;
+    cur_index = 0;
+    transaction_timeout = 1024;
+    axi_id_reg = 0;
+    loop_count = 0;
+    num_loops = 1;
+    config_reg = 0;
+    burst_reg = 0;
+    dwvecsize = VEC_DWS;
+    pv_cycle_cnt = 0;
+    pv_arvalid_cnt = 0;
+    pv_rvalid_cnt = 0;
+    pv_awvalid_cnt = 0;
+    pv_wvalid_cnt = 0;
+    pv_max_read_lat = 0;
+    pv_max_write_lat = 0;
+    clear_errors();
+}

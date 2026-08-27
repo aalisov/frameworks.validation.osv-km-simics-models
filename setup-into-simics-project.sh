@@ -27,7 +27,24 @@ DO_BUILD=1
 ENV_SCRIPT=""
 
 usage() {
-  sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+  cat <<'EOF'
+Install KM Simics device models into a Simics project (fresh or existing).
+
+Typical use after a new Simics / km-hps checkout:
+
+  git clone https://github.com/aalisov/frameworks.validation.osv-km-simics-models.git
+  cd frameworks.validation.osv-km-simics-models
+  ./setup-into-simics-project.sh
+
+Options:
+  -p, --project DIR   Simics project (default: $SIMICS_PROJECT or ~/km-hps)
+  -c, --copy          Copy modules instead of symlink
+  -f, --force         Replace existing modules/vsip-memsrc and modules/p3t1755
+  -n, --no-build      Link/copy only; skip make
+  -e, --env-script F  Env script to source before build
+                      (default: PROJECT/set_simics_env_main.sh)
+  -h, --help          This help
+EOF
   exit "${1:-0}"
 }
 

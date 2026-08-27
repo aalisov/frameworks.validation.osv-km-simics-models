@@ -4,8 +4,10 @@ Standalone Simics 7 device models for Kinneloa Mesa (`agilex72-universal`) OSBV 
 
 | Module | Description |
 |--------|-------------|
-| `vsip-memsrc/` | VSIP memory traffic generator (mem_source functional model). CPU MMIO @ `0xF9000000` (control / vectors / errors). |
+| `vsip-memsrc/` | VSIP memory traffic generator (mem_source functional model). CPU MMIO @ `0xF9000000`. |
 | `p3t1755/` | NXP P3T1755 I3C temperature sensor (OSBV `i3cdev` / DT `236152A0090`). |
+
+Each module ships **`board_hooks.py`** — the supported way to instantiate and wire devices onto a KM board component.
 
 Validated with supersmasher `sample-vsip-memsrc-km.cfg` → **PASS** on KM OSBV Simics (SMP+SVE).
 
@@ -19,34 +21,45 @@ ln -sfn /path/to/frameworks.validation.osv-km-simics-models/p3t1755 modules/p3t1
 make
 ```
 
-### Board integration (required for VSIP PASS)
+### Board integration (via board_hooks)
 
-`km-universal-board-comp` must:
-
-1. Map VSIP MMIO into `fpga.hps.apu.phys_mem` at `0xF9000000` (256 KiB).
-2. Wire the device F2 master to **`phys_mem`** (same PA space as CPU DRAM), not a private stub RAM:
+In `km-universal-board-comp` (or your board):
 
 ```python
-vsip_memsrc_0.dev.f2_mem = fpga.hps.apu.phys_mem
+# add_objects()
+from simmod.vsip_memsrc.board_hooks import add_vsip_memsrc
+from simmod.p3t1755.board_hooks import add_p3t1755, connect_p3t1755
+
+if self.create_vsip_memsrc.val:
+    add_vsip_memsrc(self, base=self.vsip_memsrc_base.val)
+
+add_p3t1755(self)
+connect_p3t1755(self, i3c_bus_dev_slot="i3c_bus[0].dev_slot[4]")
+
+# component.post_instantiate()
+from simmod.vsip_memsrc.board_hooks import wire_vsip_memsrc
+
+if self._up.create_vsip_memsrc.val:
+    wire_vsip_memsrc(self._up, base=self._up.vsip_memsrc_base.val)
 ```
 
-Without (2), supersmasher reports `rvalid=0` / transaction errors because vector addresses (e.g. `0xf0000000`) miss the stub.
+`wire_vsip_memsrc` does both:
+
+1. Map VSIP MMIO into `fpga.hps.apu.phys_mem` at `0xF9000000` (256 KiB)
+2. Route F2 master to the **same** `phys_mem` (required for supersmasher DRAM addresses)
 
 ### Model details (vsip-memsrc)
 
-- Nested `mmio` banks use **relative** offsets `0 / 0x10000 / 0x20000` (phys_mem maps the window at base).
-- `num_loops` is honored for finite runs; `CONF_LOOP` means infinite.
-- Perf counters: one AW/AR per burst, one W/R per beat; cleared each RUN.
+- Nested `mmio` banks use **relative** offsets `0 / 0x10000 / 0x20000`
+- `num_loops` honored for finite runs; `CONF_LOOP` = infinite
+- Perf counters: one AW/AR per burst, one W/R per beat; cleared each RUN
 
 ## OSBV device tree / DRAM carveout
 
-VSIP nodes come from Yocto `km-simics-dtbo` overlays (not base DTB):
-
 ```bash
 osvloaddtoverlay km-simics-vsip
-# DRAM for vecscripts (boot with mem=1792M):
 modprobe HWAPIMod
-allocate_mem_targets -s 0xf0000000 -e 0xf2000000
+allocate_mem_targets -s 0xf0000000 -e 0xf2000000   # needs bootargs mem=1792M
 cd /usr/share/supersmasher
 supersmasher -c sample-vsip-memsrc-km.cfg
 ```

@@ -22,17 +22,28 @@ elif [[ -f "$SIMICS_PROJECT/local-env.sh" ]]; then
   # shellcheck disable=SC1091
   _km_save_base="${SIMICS_BASE:-}"
   source "$SIMICS_PROJECT/local-env.sh"
-  if [[ -n "${SIMICS_BASE:-}" && "${SIMICS_BASE}" != *intel-fpga-main* && "${SIMICS_BASE}" != *intel-fpga_main* ]]; then
+  if [[ -n "${SIMICS_BASE:-}" && "${SIMICS_BASE}" != *intel-fpga-main* \
+    && "${SIMICS_BASE}" != *intel-fpga_main* \
+    && "${SIMICS_BASE}" != *intel-fpga-ext_main* ]]; then
     echo "WARNING: local-env.sh set non-main SIMICS_BASE=$SIMICS_BASE — ignoring for main env"
     unset SIMICS_BASE SIMICS_FPGA_ROOT SIMICS_BASE_PACKAGE
     [[ -n "$_km_save_base" ]] && export SIMICS_BASE="$_km_save_base"
   fi
 fi
 
+_km_hps_is_main_tree() {
+  # Accept Altera directory names for the mainline (km_hps_dsu_120) product:
+  #   intel-fpga-main*, intel-fpga_main*, intel-fpga-ext_main* (newer installer name)
+  case "$1" in
+    *intel-fpga-main*|*intel-fpga_main*|*intel-fpga-ext_main*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 _km_hps_detect_simics_main() {
   local cand root
-  if [[ -n "${SIMICS_BASE:-}" && -x "${SIMICS_BASE}/bin/simics" \
-    && ( "${SIMICS_BASE}" == *intel-fpga-main* || "${SIMICS_BASE}" == *intel-fpga_main* ) ]]; then
+  if [[ -n "${SIMICS_BASE:-}" && -x "${SIMICS_BASE}/bin/simics" ]] \
+    && _km_hps_is_main_tree "${SIMICS_BASE}"; then
     export SIMICS_FPGA_ROOT="${SIMICS_FPGA_ROOT:-$(cd "${SIMICS_BASE}/.." && pwd)}"
     return 0
   fi
@@ -57,6 +68,8 @@ _km_hps_detect_simics_main() {
         "$root"/intel-fpga-main*/simics/simics-[0-9]* \
         "$root"/intel-fpga_main*/simics/simics-[0-9]* \
         "$root"/intel-fpga_main/simics/simics-[0-9]* \
+        "$root"/intel-fpga-ext_main*/simics/simics-[0-9]* \
+        "$root"/intel-fpga-ext_main/simics/simics-[0-9]* \
         2>/dev/null | sort -V -r
     )
   done
@@ -64,7 +77,7 @@ _km_hps_detect_simics_main() {
 }
 
 if ! _km_hps_detect_simics_main; then
-  echo "ERROR: Could not find intel-fpga-main Simics." >&2
+  echo "ERROR: Could not find intel-fpga-main / intel-fpga-ext_main Simics." >&2
   echo "       Set SIMICS_BASE in $SIMICS_PROJECT/local-env-main.sh" >&2
   return 1 2>/dev/null || exit 1
 fi

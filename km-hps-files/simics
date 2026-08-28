@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Portable Simics launcher for $HOME/km-hps (or any checkout of this project).
+# Prefer:  source ./set_simics_env_main.sh && ./simics ...
+# Or:      ./simics scripts/boot-to-linux-smp.simics
+#
+# Does not hard-code install paths — uses SIMICS_BASE from the environment /
+# set_simics_env_main.sh / local-env.sh.
+
+set -euo pipefail
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+if [[ -z "${SIMICS_BASE:-}" || ! -x "${SIMICS_BASE}/bin/simics" ]]; then
+  # shellcheck disable=SC1091
+  source "$ROOT/set_simics_env_main.sh"
+fi
+
+if [[ ! -x "${SIMICS_BASE}/bin/simics" ]]; then
+  echo "ERROR: SIMICS_BASE/bin/simics not executable: ${SIMICS_BASE:-unset}" >&2
+  exit 1
+fi
+
+export SIMICS_BASE_PACKAGE="${SIMICS_BASE_PACKAGE:-$SIMICS_BASE}"
+exec "${SIMICS_BASE}/bin/simics" --project "$ROOT" "$@"

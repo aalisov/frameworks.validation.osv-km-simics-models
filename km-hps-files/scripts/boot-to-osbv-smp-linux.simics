@@ -1,0 +1,145 @@
+# =============================================================================
+# OSBV on intel-fpga-main: SMP-on + SVE-on (maxcpus=4)
+# =============================================================================
+#
+# Requires: source ~/km-hps/set_simics_env_main.sh
+# FIT should embed bl31-sve (ATF_SVE_DEFAULT=sve). No arm64.nosve.
+#
+#   ./scripts/run-osbv-smp.sh
+#   telnet 127.0.0.1 9123
+# =============================================================================
+
+add-directory "%script%"
+$script_dir = (resolve-file "%script%")
+$project_dir = $script_dir + "/.."
+
+if not defined artifacts_dir {
+    if defined payload_dir {
+        $artifacts_dir = $payload_dir
+    } else {
+        $artifacts_dir = $project_dir + "/images/osbv"
+    }
+}
+add-directory $artifacts_dir
+echo "artifacts_dir = %s" % $artifacts_dir
+echo "mode: main SMP-on + SVE-on (maxcpus=4)"
+
+if not defined spl_name    { $spl_name    = "u-boot-spl-dtb.bin" }
+if not defined ssbl_name   { $ssbl_name   = "u-boot.itb" }
+if not defined bl31_name   { $bl31_name   = "bl31-sve.bin" }
+if not defined kernel_name { $kernel_name = "Image" }
+if not defined dtb_name    { $dtb_name    = "socfpga_km_OSbV_sdmmc.dtb" }
+if not defined wic_name {
+    $wic_name = "core-image-full-cmdline-km_osbv_sdmmc.wic"
+}
+
+$spl_bin = $artifacts_dir + "/" + $spl_name
+$ssbl_image = $artifacts_dir + "/" + $ssbl_name
+$bl31_bin = $artifacts_dir + "/" + $bl31_name
+$kernel_image = $artifacts_dir + "/" + $kernel_name
+$dtb_image = $artifacts_dir + "/" + $dtb_name
+$sd_image = $artifacts_dir + "/" + $wic_name
+
+if not defined bootargs {
+    $bootargs = "console=ttyS0,115200n8 root=/dev/mmcblk0p2 rw rootwait maxcpus=4"
+}
+
+if not defined sdm_hmod_fw_image_filename {
+    $sdm_hmod_fw_image_filename = ""
+}
+if $sdm_hmod_fw_image_filename != "" {
+    if not (lookup-file $sdm_hmod_fw_image_filename -query) {
+        echo "WARNING: SDM HMOD FW not found: %s" % $sdm_hmod_fw_image_filename
+        $sdm_hmod_fw_image_filename = ""
+    }
+}
+
+output-radix base = 16
+
+$hps_apu_fsbl_image_filename = ""
+$create_hps_sd_card = TRUE
+$create_hps_sd_card1 = FALSE
+$create_hps_mmc = FALSE
+$create_hps_mmc1 = FALSE
+$create_hps_eth0_network = FALSE
+$create_hps_apu_serial0_console = TRUE
+$create_hps_apu_serial1_console = FALSE
+$create_hps_apu_serial2_console = FALSE
+
+if not defined console_telnet_port { $console_telnet_port = 9123 }
+
+if not (lookup-file $spl_bin -query) {
+    echo "ERROR: missing SPL: %s" % $spl_bin
+    exit 1
+}
+if not (lookup-file $ssbl_image -query) {
+    echo "ERROR: missing u-boot.itb: %s" % $ssbl_image
+    exit 1
+}
+if not (lookup-file $kernel_image -query) {
+    echo "ERROR: missing Image: %s" % $kernel_image
+    exit 1
+}
+if not (lookup-file $dtb_image -query) {
+    echo "ERROR: missing DTB: %s" % $dtb_image
+    exit 1
+}
+if not (lookup-file $sd_image -query) {
+    echo "ERROR: missing WIC: %s" % $sd_image
+    exit 1
+}
+
+$spl_bin = (lookup-file $spl_bin)
+$ssbl_image = (lookup-file $ssbl_image)
+$kernel_image = (lookup-file $kernel_image)
+$dtb_image = (lookup-file $dtb_image)
+$sd_image = (lookup-file $sd_image)
+if (lookup-file $bl31_bin -query) {
+    $bl31_bin = (lookup-file $bl31_bin)
+}
+
+$sd_image_filename0 = $sd_image
+
+run-command-file (sim->workspace + "/targets/km/agilex72-universal-fixed.simics")
+
+$hps = system.board.fpga.hps
+$con = $hps.lsp.console0.con
+$con.show
+if $console_telnet_port != 0 {
+    $con.telnet-setup $console_telnet_port
+    echo "UART0 telnet: telnet 127.0.0.1 %d" % $console_telnet_port
+}
+
+$hps.apu.phys_mem.load-file $spl_bin 0x0
+psel $hps.apu.mpu.cores[0]
+penable
+enable-debugger
+load-file $ssbl_image 0x82000000
+load-file $dtb_image 0x88000000
+
+script-branch {
+    bp.console_string.wait-then-write $con "Hit any key to stop autoboot" "\r"
+}
+script-branch {
+    bp.console_string.wait-for $con "SOCFPGA_KM # "
+    stop
+}
+run
+
+load-file $kernel_image 0x82000000
+
+echo "Cluster PPU ON @ 0x08030000"
+$hps.apu.phys_mem.write address = 0x08030000 value = 0x8 size = 4
+
+echo "Injecting bootargs + booti: %s" % $bootargs
+$con.input ("setenv bootargs " + $bootargs + "\r")
+script-branch {
+    bp.console_string.wait-for $con "SOCFPGA_KM # "
+    $con.input "printenv bootargs\r"
+}
+script-branch {
+    bp.console_string.wait-for $con "SOCFPGA_KM # "
+    $con.input "booti 0x82000000 - 0x88000000\r"
+    echo "=== booti issued — expect nproc=4 ==="
+}
+run

@@ -1,0 +1,795 @@
+##############################################################################
+# Generic KM Linux / baremetal boot script for the KM ArmV9 Simics platform.
+#
+# One script drives both Simics targets, all U-Boot sources and all OS load
+# methods. Override any option on the command line, e.g.:
+#   ./bin/simics my_km_generic.simics TARGET=mudv BOOT_MEDIA=sd
+#
+# ===========================================================================
+#                                CHEAT SHEET
+# ===========================================================================
+# INPUT          DEFAULT     VALUES                  MEANING
+# -------------  ----------  ----------------------  ---------------------------
+# TARGET         universal   universal | mudv        Simics board (namespace auto)
+# BOOT_MEDIA     ram         ram|sd|qspi|sdm_qspi    WHERE U-BOOT COMES FROM
+# BOOT_METHOD    backdoor    backdoor|sd|baremetal   WHAT U-BOOT LOADS NEXT (OS)
+# AUTO_BOOT      TRUE        TRUE | FALSE            auto-drive boot / stop at U-Boot
+# BOOT_CORE      0           0..3                    APU core that runs FSBL/SPL
+# EXTRA_BOOTARGS ""          any string              extra kernel params (arm64.nosve)
+# DUMP_CPUINFO   FALSE       TRUE | FALSE            dump /proc/cpuinfo then quit
+#
+# PATH OVERRIDES (portability - defaults work for a standard checkout):
+#   UBOOT_DIR=./uboot          u-boot.itb, u-boot-spl-dtb.bin/.hex, bl31.elf, u-boot
+#   IMG_DIR=./soc-hps-bin      Image, initrd135.uboot, socfpga_agilex72_socdk.dtb, *.wic,
+#                              test.elf, output_file_jic.rpd
+#   BM_DIR=./baremetal         baremetal payload dir
+#   SCRATCH_DIR=/tmp           writable dir for UART log / temp files (per-user)
+#   UART_LOG, BM_IMAGE, BM_LOAD_ADDR(0x82000000), BM_QUIT(TRUE)
+#
+# ---------------------------------------------------------------------------
+# THE TWO BOOT AXES (key mental model)
+#
+#   [ SPL -> ATF -> U-Boot ]        ->        [ kernel / payload ]
+#            ^                                         ^
+#        BOOT_MEDIA                               BOOT_METHOD
+#    (how U-Boot arrives)                    (what U-Boot loads next)
+#
+# BOOT_MEDIA - where U-Boot comes from:
+#   ram       backdoor u-boot.itb into DRAM (fastest)        needs uboot/u-boot.itb
+#   sd        U-Boot + OS from .wic SD card                  needs *.wic
+#             (implies BOOT_METHOD=sd; no u-boot.itb backdoor)
+#   qspi      U-Boot from HPS  OSPI flash (RPD)              needs *.rpd
+#   sdm_qspi  U-Boot from SDM  OSPI flash (RPD) - MUDV ONLY  needs *.rpd + TARGET=mudv
+#
+# BOOT_METHOD - what U-Boot loads next:
+#   backdoor  backdoor Image/initrd/dtb to DRAM, scripted booti
+#   sd        U-Boot autoboots the OS from the .wic
+#   baremetal backdoor baremetal.bin to DRAM, then 'go' to it
+#
+# ---------------------------------------------------------------------------
+# VALID vs REJECTED COMBINATIONS (rejected ones exit early with a message)
+#
+#   BOOT_MEDIA \ BOOT_METHOD   backdoor    sd          baremetal
+#   ram                         OK(default) OK(hybrid)  OK
+#   sd                          ->auto sd   OK(redund.) ERROR
+#   qspi                        ERROR       OK          OK
+#   sdm_qspi (mudv only)        ERROR       OK          OK
+#
+#   - qspi/sdm_qspi + backdoor : flash U-Boot cannot pair with a backdoored OS
+#   - sd + baremetal           : use BOOT_MEDIA=ram BOOT_METHOD=baremetal instead
+#   - sdm_qspi + universal     : needs TARGET=mudv (XspiConnector is mudv-only)
+#
+# ---------------------------------------------------------------------------
+# COMMON RECIPES
+#   ./bin/simics my_km_generic.simics                                  # default: backdoor U-Boot + Linux ramdisk
+#   ./bin/simics my_km_generic.simics AUTO_BOOT=FALSE                  # stop at U-Boot prompt (manual)
+#   ./bin/simics my_km_generic.simics BOOT_MEDIA=sd                    # full SD boot (my_km_sd.simics equiv)
+#   ./bin/simics my_km_generic.simics BOOT_MEDIA=ram BOOT_METHOD=sd    # hybrid: U-Boot RAM, OS from .wic
+#   ./bin/simics my_km_generic.simics BOOT_MEDIA=qspi BOOT_METHOD=sd   # U-Boot from HPS QSPI, OS from SD
+#   ./bin/simics my_km_generic.simics TARGET=mudv BOOT_MEDIA=sdm_qspi  # SDM QSPI flash boot (mudv)
+#   ./bin/simics my_km_generic.simics BOOT_METHOD=baremetal BM_QUIT=FALSE   # baremetal SVE, stay up
+#   ./bin/simics my_km_generic.simics BOOT_CORE=2 DUMP_CPUINFO=TRUE    # validate boot core + cpuinfo
+#   ./bin/simics my_km_generic.simics EXTRA_BOOTARGS=arm64.nosve       # disable SVE in kernel
+#   ./bin/simics my_km_generic.simics IMG_DIR=/nfs/.../my_ws/soc-hps-bin    # images in another workspace
+#
+# Namespace differences handled automatically:
+#   universal : system.board.fpga.{hps,sdm} , sdm.pinmux
+#   mudv      : board.chip.pscc.{hps,sdm}   , sdm.ana.pinmux
+##############################################################################
+
+# ----------------------------------------------------------------------------
+# User-selectable options (override on the command line, e.g. TARGET=mudv)
+# ----------------------------------------------------------------------------
+if not defined TARGET      { $TARGET      = "universal" }   # "universal" | "mudv"
+if not defined BOOT_METHOD { $BOOT_METHOD = "backdoor"  }   # "backdoor" | "sd" | "baremetal"
+if not defined BOOT_MEDIA  { $BOOT_MEDIA  = "ram"       }   # "ram" | "sd" | "qspi" | "sdm_qspi"
+if not defined AUTO_BOOT   { $AUTO_BOOT   = TRUE         }   # TRUE | FALSE
+if not defined BOOT_CORE   { $BOOT_CORE   = 0            }   # 0..3 : APU core that runs the boot (FSBL/SPL)
+if not defined EXTRA_BOOTARGS { $EXTRA_BOOTARGS = ""     }   # optional extra kernel params (e.g. arm64.nosve)
+if not defined DUMP_CPUINFO  { $DUMP_CPUINFO  = FALSE     }   # TRUE: dump /proc/cpuinfo on serial after Linux boot
+if not defined SKIP_DEBUG_SYMBOLS { $SKIP_DEBUG_SYMBOLS = TRUE      }   # TRUE: skip bl31.elf/u-boot debug symbols   # TRUE: dump /proc/cpuinfo on serial after Linux boot
+if not defined SMMU_DMA_TEST { $SMMU_DMA_TEST = FALSE     }   # TRUE: eth0 up + ping + ethtool selftest to exercise DMA through the SMMU, then quit
+if not defined SDMMC_SMMU_TEST { $SDMMC_SMMU_TEST = FALSE }   # TRUE: attach SD card to mmc0 + dd DMA to /dev/mmcblk0 to exercise SDMMC DMA through the SMMU, then quit
+if not defined SDMMC_BOTH { $SDMMC_BOTH = FALSE }            # TRUE: also attach a SECOND SD card (a distinct copy of the .wic) to mmc1 (slot1, iommus=<&smmu 6>) so BOTH SDMMC controllers can be tested behind the SMMU
+
+# ===========================================================================
+# PORTABILITY CONFIG - the ONLY paths a new user may need to change.
+#
+# Defaults are relative to the simics/ directory this script is run from, so a
+# standard checkout works with NO edits. If your built images live elsewhere,
+# either edit the defaults below or override on the command line, e.g.:
+#   ./bin/simics my_km_generic.simics IMG_DIR=/nfs/.../my_ws/images
+#   ./bin/simics my_km_generic.simics UBOOT_DIR=../uboot/out SCRATCH_DIR=$HOME/tmp
+# ===========================================================================
+if not defined UBOOT_DIR   { $UBOOT_DIR   = "./uboot"        }  # u-boot.itb, SPL, bl31.elf, u-boot
+if not defined IMG_DIR     { $IMG_DIR     = "./soc-hps-bin"  }  # Image, initrd, dtb, .wic, test.elf
+if not defined BM_DIR      { $BM_DIR      = "./baremetal"    }  # baremetal payload dir
+if not defined SCRATCH_DIR { $SCRATCH_DIR = "/tmp"           }  # writable dir for logs / temp files
+# Per-user tag keeps scratch files unique so concurrent users on a shared
+# compute host do not clobber each other's logs / temp files.
+@simenv.USER_TAG = __import__('os').environ.get('USER', 'user')
+
+if not defined UART_LOG    { $UART_LOG    = {$SCRATCH_DIR + "/uart_linux_" + $USER_TAG + ".log"} } # APU UART capture file
+if not defined BM_IMAGE    { $BM_IMAGE    = {$BM_DIR + "/baremetal.bin"} } # baremetal payload (BOOT_METHOD=baremetal)
+if not defined BM_LOAD_ADDR { $BM_LOAD_ADDR = 0x82000000 }  # DRAM load/run address for the baremetal payload
+if not defined BM_QUIT     { $BM_QUIT     = TRUE         }   # TRUE: quit Simics after "BAREMETAL: DONE" (validation); FALSE: stay up for debug
+
+# Normalize and validate BOOT_CORE (command-line values may arrive as strings).
+@simenv.BOOT_CORE = int(simenv.BOOT_CORE)
+@assert 0 <= simenv.BOOT_CORE <= 3, "BOOT_CORE must be 0..3, got %r" % simenv.BOOT_CORE
+
+# ----------------------------------------------------------------------------
+# Validate option values and reject impossible combinations up front, so the
+# user gets a clear message instead of a confusing failure deep in target
+# setup. BOOT_MEDIA and BOOT_METHOD are mostly independent; a few combos are
+# rejected below (see BOOT_MEDIA=sd notes).
+# ----------------------------------------------------------------------------
+if (($TARGET != "universal") and ($TARGET != "mudv")) {
+    echo "ERROR: TARGET must be universal|mudv (got %s)" % $TARGET
+    exit 1
+}
+if ((($BOOT_METHOD != "backdoor") and ($BOOT_METHOD != "sd")) and ($BOOT_METHOD != "baremetal")) {
+    echo "ERROR: BOOT_METHOD must be backdoor|sd|baremetal (got %s)" % $BOOT_METHOD
+    exit 1
+}
+if ((($BOOT_MEDIA != "ram") and ($BOOT_MEDIA != "sd") and ($BOOT_MEDIA != "qspi")) and ($BOOT_MEDIA != "sdm_qspi")) {
+    echo "ERROR: BOOT_MEDIA must be ram|sd|qspi|sdm_qspi (got %s)" % $BOOT_MEDIA
+    exit 1
+}
+# IMPOSSIBLE COMBO: SDM QSPI flashing uses simmod.mudv_helper.xspi.XspiConnector,
+# which is bound to the mudv board object hierarchy, so it only works on the mudv
+# target. (HPS QSPI, BOOT_MEDIA=qspi, works on both targets.)
+if (($BOOT_MEDIA == "sdm_qspi") and ($TARGET != "mudv")) {
+    echo "ERROR: BOOT_MEDIA=sdm_qspi requires TARGET=mudv (XspiConnector is a mudv-only helper)."
+    echo "       Fix: add TARGET=mudv, or use BOOT_MEDIA=qspi (HPS OSPI flash, works on both targets)."
+    exit 1
+}
+# BOOT_MEDIA=sd (my_km_sd.simics): U-Boot and OS come from the .wic SD card;
+# do not backdoor u-boot.itb.  Implies BOOT_METHOD=sd unless user overrides.
+if $BOOT_MEDIA == "sd" {
+    if $BOOT_METHOD == "baremetal" {
+        echo "ERROR: BOOT_MEDIA=sd cannot be used with BOOT_METHOD=baremetal."
+        echo "       Use BOOT_MEDIA=ram BOOT_METHOD=baremetal for a RAM-injected payload."
+        exit 1
+    }
+    if $BOOT_METHOD == "backdoor" {
+        $BOOT_METHOD = "sd"
+        echo "NOTE: BOOT_MEDIA=sd implies BOOT_METHOD=sd (my_km_sd.simics full SD boot)."
+    }
+}
+# BOOT_METHOD=backdoor injects Linux into RAM - incompatible with flash boot
+# media where U-Boot is fetched from the RPD, not backdoored.
+if (($BOOT_MEDIA == "qspi") or ($BOOT_MEDIA == "sdm_qspi")) {
+    if $BOOT_METHOD == "backdoor" {
+        echo "ERROR: BOOT_METHOD=backdoor requires BOOT_MEDIA=ram."
+        echo "       Flash boot media fetches U-Boot from the RPD; use BOOT_METHOD=sd or baremetal."
+        exit 1
+    }
+}
+
+# ----------------------------------------------------------------------------
+# Image / file locations
+# ----------------------------------------------------------------------------
+$UBOOT_BIN = $UBOOT_DIR
+local $itb_file   = {$UBOOT_BIN + "/u-boot.itb"}
+local $fsbl_image = {$UBOOT_BIN + "/u-boot-spl-dtb.bin"}
+local $fsbl_hex   = {$UBOOT_BIN + "/u-boot-spl-dtb.hex"}
+
+$kernel_image = {$IMG_DIR + "/Image"}
+if not defined initrd_image {
+    if (lookup-file {$IMG_DIR + "/initrd135.uboot"} -query) {
+        $initrd_image = {$IMG_DIR + "/initrd135.uboot"}
+    } else if (lookup-file {$IMG_DIR + "/initrd_emul.uboot"} -query) {
+        $initrd_image = {$IMG_DIR + "/initrd_emul.uboot"}
+    } else {
+        $initrd_image = {$IMG_DIR + "/initrd135.uboot"}
+    }
+}
+# DTB must match the built kernel/branch. The KM branch uses socfpga_km.dtb,
+# whose UART node references a fixed 18.432 MHz uart0_baud_clk (matching BL31);
+# the agilex72 SoCDK dtb instead wires the UART to the Agilex72 clock manager,
+# which the KM model does not provide, so dw-apb-uart never registers ttyS0 and
+# the kernel panics with "unable to open an initial console". Override with
+# DTB_NAME=... on the command line for other targets.
+if not defined DTB_NAME { $DTB_NAME = "socfpga_km.dtb" }
+$dtb_image    = {$IMG_DIR + "/" + $DTB_NAME}
+$sd_image     = {$IMG_DIR + "/gsrd-console-image-agilex5_lok.wic"}
+$sd_image1    = {$IMG_DIR + "/gsrd-console-image-agilex5_lok_slot1.wic"}  # distinct copy for mmc1/slot1 (SDMMC_BOTH)
+if not defined hps_rtu_fsbl_image_filename {
+    if (lookup-file {$IMG_DIR + "/test.elf"} -query) {
+        $hps_rtu_fsbl_image_filename = {$IMG_DIR + "/test.elf"}
+    } else {
+        $hps_rtu_fsbl_image_filename = ""
+    }
+}
+$rpd_image    = {$IMG_DIR + "/output_file_jic.rpd"}        # full flash image for qspi / sdm_qspi boot
+
+# Backdoor load addresses (must match the booti arguments below)
+$kernel_load_addr = 0x82000000
+$initrd_load_addr = 0x90000000
+$dtb_load_addr    = 0x88000000
+
+# U-Boot interactive prompt string (same socfpga_km U-Boot on both targets)
+$uboot_prompt = "SOCFPGA_KM #"
+
+output-radix base = 16
+add-directory "%script%"
+$log_dir = (resolve-file "%script%")
+
+# ----------------------------------------------------------------------------
+# Storage parameters: attach the .wic SD image when either
+#   BOOT_MEDIA=sd  (full SD boot, my_km_sd.simics) or
+#   BOOT_METHOD=sd (hybrid: U-Boot from RAM/flash, OS from .wic).
+# Both universal and mudv parameter name variants are set.
+# ----------------------------------------------------------------------------
+if (($BOOT_MEDIA == "sd") or ($BOOT_METHOD == "sd")) {
+    if not (lookup-file $sd_image -query) {
+        echo "ERROR: SD image %s not found" % $sd_image
+        exit 1
+    }
+    $en_sd  = TRUE
+    $sd_img = $sd_image
+} else {
+    $en_sd  = FALSE
+    $sd_img = ""
+}
+# SDMMC SMMU test: attach the .wic as an SD card on mmc0 even for a backdoor
+# (RAM) boot, so the backdoored socfpga_agilex72_socdk.dtb (mmc0 iommus=<&smmu 5>) is used
+# while Linux still enumerates a real card to DMA against through the SMMU.
+if $SDMMC_SMMU_TEST {
+    if not (lookup-file $sd_image -query) {
+        echo "ERROR: SD image %s not found (needed for SDMMC_SMMU_TEST)" % $sd_image
+        exit 1
+    }
+    $en_sd  = TRUE
+    $sd_img = $sd_image
+}
+# SDMMC_BOTH: attach a card to BOTH controllers so mmc0 (SID 5) and mmc1
+# (SID 6) can be exercised behind the SMMU at once. slot0 keeps the .wic;
+# slot1 gets a DISTINCT copy so the two controllers never share a backing
+# file. Forces a slot0 card too, so it works even on a backdoor/RAM boot.
+if $SDMMC_BOTH {
+    if not (lookup-file $sd_image -query) {
+        echo "ERROR: SD image %s not found (needed for SDMMC_BOTH)" % $sd_image
+        exit 1
+    }
+    $en_sd  = TRUE
+    $sd_img = $sd_image
+}
+# universal (km-universal) parameter names
+$create_hps_sd_card  = $en_sd
+$sd_image_filename   = $sd_img
+$create_hps_mmc      = FALSE
+$mmc_image_filename  = ""
+# mudv (km4-mudv-board) parameter names
+$create_hps_sd_card0 = $en_sd
+$sd_image_filename0  = $sd_img
+$create_hps_mmc0     = FALSE
+$mmc_image_filename0 = ""
+# shared parameter names
+# slot1 -> mmc1 (mmc@9004000, iommus=<&smmu 5>). Attached for ANY SD boot so
+# Linux always enumerates mmc1 behind the SMMU (SID 5, shared with mmc0). A
+# DISTINCT image copy is used so mmc0/mmc1 never share a backing file (mmc0 in
+# slot0 is the boot device; mmc1 in slot1 is a working data card behind SMMU).
+if $en_sd {
+    if not (lookup-file $sd_image1 -query) {
+        echo "ERROR: slot1 SD image %s not found." % $sd_image1
+        echo "       mmc1 (slot1) needs a separate copy of the .wic, e.g.:"
+        echo "         cp %s %s" % [$sd_image, $sd_image1]
+        exit 1
+    }
+    $create_hps_sd_card1 = TRUE
+    $sd_image_filename1  = $sd_image1
+    echo "mmc1 (slot1, SID 5) will use %s" % $sd_image1
+} else {
+    $create_hps_sd_card1 = FALSE
+    $sd_image_filename1  = ""
+}
+$create_hps_mmc1     = FALSE
+$create_hps_apu_serial0_console = TRUE
+# Load SPL manually (bin @ phys_mem:0). Avoid target auto-load + hex loader.
+$hps_apu_fsbl_image_filename    = ""
+$hps_fsbl_symbol                = "u-boot-spl"
+
+# Boot-core selection must be set before run-script: km-universal / mudv pass
+# hps_boot_core into km_hps_comp at instantiation (read-only after that).
+$hps_boot_core = $BOOT_CORE
+
+# ----------------------------------------------------------------------------
+# Target selection: choose the target script and the namespace strings.
+# ----------------------------------------------------------------------------
+if $TARGET == "mudv" {
+    $TARGET_SCRIPT = (sim->project + "/targets/km/km4-mudv-board.simics")
+    $hps_s    = "board.chip.pscc.hps"
+    $sdm_s    = "board.chip.pscc.sdm"
+    $pinmux_s = "board.chip.pscc.sdm.ana.pinmux"
+} else {
+    # Use fixed local target: bypasses broken regs_PSS.skip_reg_internal_filter
+    # and powers on DSU cluster/core PPUs at boot (needed for SMP).
+    $TARGET_SCRIPT = (sim->project + "/targets/km/agilex72-universal-fixed.simics")
+    $hps_s    = "system.board.fpga.hps"
+    $sdm_s    = "system.board.fpga.sdm"
+    $pinmux_s = "system.board.fpga.sdm.pinmux"
+}
+
+echo "=============================================================="
+echo "KM generic boot: TARGET=%s BOOT_METHOD=%s BOOT_MEDIA=%s AUTO_BOOT=%s BOOT_CORE=%d DUMP_CPUINFO=%s" % [$TARGET, $BOOT_METHOD, $BOOT_MEDIA, $AUTO_BOOT, $BOOT_CORE, $DUMP_CPUINFO]
+echo "=============================================================="
+
+# HPS QSPI boot: preload the HPS OSPI flash with the full RPD image so the
+# SDM/boot ROM fetches FSBL+U-Boot from QSPI. $ospi0_flash0_image_filename is
+# consumed by the target script at instantiation, so it MUST be set first.
+if $BOOT_MEDIA == "qspi" {
+    if not (lookup-file $rpd_image -query) {
+        echo "ERROR: qspi boot image %s not found" % $rpd_image
+        exit 1
+    }
+    $ospi0_flash0_image_filename = $rpd_image
+    echo "QSPI boot: HPS OSPI flash will be loaded from %s" % $rpd_image
+}
+
+run-script $TARGET_SCRIPT
+
+# ----------------------------------------------------------------------------
+# Object-reference handles (valid only after the target is instantiated).
+# ----------------------------------------------------------------------------
+if $TARGET == "mudv" {
+    $board = board
+    $hps   = board.chip.pscc.hps
+    $sdm   = board.chip.pscc.sdm
+} else {
+    $board = system.board
+    $hps   = system.board.fpga.hps
+    $sdm   = system.board.fpga.sdm
+}
+$con = $hps.lsp.console0.con
+
+# SDM QSPI boot: flash the RPD into the SDM-attached OSPI via the mudv xspi
+# helper, so the SDM boot ROM fetches the boot image from SDM QSPI flash.
+if $BOOT_MEDIA == "sdm_qspi" {
+    if not (lookup-file $rpd_image -query) {
+        echo "ERROR: sdm_qspi boot image %s not found" % $rpd_image
+        exit 1
+    }
+    @from simmod.mudv_helper.xspi import XspiConnector
+    @xspi_helper = XspiConnector()
+    @xspi_helper.ospi.erase()
+    @xspi_helper.ospi.load_file(simenv.rpd_image, 0)
+    echo "SDM QSPI boot: SDM OSPI flash loaded from %s" % $rpd_image
+}
+
+# ----------------------------------------------------------------------------
+# Load U-Boot proper (FIT image) into DRAM and add debug symbols.
+# Only BOOT_MEDIA=ram backdoors the FIT into DRAM.  sd/qspi/sdm_qspi fetch
+# U-Boot from SD or flash (my_km_sd.simics skips the itb preload for sd).
+# ----------------------------------------------------------------------------
+if $BOOT_MEDIA == "ram" {
+    $hps.apu.phys_mem.load-file $itb_file 0x82000000
+}
+# Debug symbols (optional). Set SKIP_DEBUG_SYMBOLS=FALSE to load from UBOOT_DIR.
+if not $SKIP_DEBUG_SYMBOLS {
+    try {
+        add-symbol-file $UBOOT_BIN + "/bl31.elf"
+    } except {
+        echo "WARNING: %s/bl31.elf not found — skipping ATF debug symbols" % $UBOOT_BIN
+    }
+    try {
+        add-symbol-file $UBOOT_BIN + "/u-boot" 0x00000000bff11000
+    } except {
+        echo "WARNING: %s/u-boot not found — skipping U-Boot debug symbols" % $UBOOT_BIN
+    }
+    try {
+        add-symbol-file {$UBOOT_BIN + "/u-boot-spl"}
+    } except {
+        echo "WARNING: %s/u-boot-spl not found — skipping SPL debug symbols" % $UBOOT_BIN
+    }
+} else {
+    echo "SKIP_DEBUG_SYMBOLS=TRUE — not loading bl31.elf / u-boot debug symbols"
+}
+
+# ----------------------------------------------------------------------------
+# Start the APU cores from OCRAM. BOOT_CORE (0..3) selects which APU core runs
+# the first-stage boot: the FSBL/U-Boot SPL image is loaded into that core's
+# memory view.  Also program MPU_BOOTCONFIG (secure manager @ 0x91520C0,
+# bits [11:10]) so ATF/U-Boot agree on the primary core, then release only
+# that core (others stay held until PSCI CPU_ON when SMP is enabled).
+# ----------------------------------------------------------------------------
+pdisable -all
+echo "Boot core selected: APU core %d" % $BOOT_CORE
+python "import conf; o=conf; [o:=getattr(o,p) for p in simenv.hps_s.split('.')]; print('Simics hps_boot_core =', o.hps_boot_core)"
+
+# MPU_BOOTCONFIG @ 0x91520C0 (secure manager): bits [11:10] = boot core ID for ATF/U-Boot.
+python "import struct, os; simenv.mpu_boot_bin=os.path.join(simenv.SCRATCH_DIR, 'mpu_boot_%s_%d.bin' % (simenv.USER_TAG, int(simenv.BOOT_CORE))); open(simenv.mpu_boot_bin,'wb').write(struct.pack('<I',(int(simenv.BOOT_CORE)&3)<<10))"
+try {
+    $hps.apu.phys_mem.load-file $mpu_boot_bin 0x91520C0
+    echo "MPU_BOOTCONFIG @ 0x91520C0 set for boot core %d" % $BOOT_CORE
+} except {
+    echo "WARNING: MPU_BOOTCONFIG @ 0x91520C0 not mapped — continuing (boot core %d)" % $BOOT_CORE
+}
+
+echo "Loading SPL @ 0x0 (phys_mem bin load)"
+$hps.apu.phys_mem.load-file $fsbl_image 0x0
+psel $hps.apu.mpu.cores[$BOOT_CORE]
+penable
+enable-debugger
+
+# Suppress expected SDM stest traps (unmapped-memory accesses are by design).
+python "import stest; stest._log_trappers.clear() if hasattr(stest, '_log_trappers') else None; stest.fail = lambda msg: print('STEST SUPPRESSED: ' + msg); print('Disabled all stest error trapping')"
+
+# Keep boot core enabled (pdisable here prevented SPL from running).
+
+# ----------------------------------------------------------------------------
+# Quiet noisy device banks.
+# ----------------------------------------------------------------------------
+$hps.hsp.apu_sysmgr.bank.core->log_group_mask = 0
+$hps.lsp.clkmgr.bank.mainpllgrp->log_group_mask = 0
+$hps.lsp.uart0.bank.regs->log_group_mask = 0
+$hps.apu.aps.icc[0].bank.aarch64->log_group_mask = 0
+
+# Reset QSPI combophy / clock manager (dynamic conf path per target).
+@import simics
+@exec("conf." + simenv.hps_s + ".lsp.ospi_combophy0.ports.reset.signal.signal_lower()")
+@exec("conf." + simenv.hps_s + ".lsp.clkmgr.ports.por_rst.signal.signal_lower()")
+
+# ----------------------------------------------------------------------------
+# SDM image presence check and debug context.
+# ----------------------------------------------------------------------------
+$sdm_image_cpu0 = $hps_rtu_fsbl_image_filename
+if ($sdm_image_cpu0 != "") {
+    if not (lookup-file $sdm_image_cpu0 -query) {
+        echo "ERROR: The supplied image %s not found" % $sdm_image_cpu0
+        exit 1
+    }
+    echo "Loading image %s" % $sdm_image_cpu0
+}
+if not (($TARGET == "universal") and ($BOOT_METHOD == "backdoor")) {
+    debug-context object = ($sdm_s + ".rvu.hart[0]")
+}
+
+# Skip SAI checker/marker on the SDM IO NoC.
+@exec("conf." + simenv.sdm_s + ".saichecker_sdm_io_noc.skip_sai_checker = True")
+@exec("conf." + simenv.sdm_s + ".saimarker_sdm_io_noc.skip_sai_marker = True")
+
+# ----------------------------------------------------------------------------
+# Lower log levels.
+# ----------------------------------------------------------------------------
+$hps.lsp.ospi0.log-level -r 0
+$sdm.xspi.log-level -r 0
+$board.ospi0_flash0.log-level -r 0
+
+# --- Silence harmless model noise (no impact on the Linux boot) -------------
+# APU cores log "Writing an unknown register" for a few optional system
+# registers the CPU model does not implement (trace-filter / GIC). They are
+# written by firmware/Linux but unused here, so mask all log groups on the
+# cores (log_group_mask=0 also suppresses error-severity logs).
+$hps.apu.mpu.cores[0]->log_group_mask = 0
+$hps.apu.mpu.cores[1]->log_group_mask = 0
+$hps.apu.mpu.cores[2]->log_group_mask = 0
+$hps.apu.mpu.cores[3]->log_group_mask = 0
+
+# The SDM xSPI shim has no SPI/QSPI flash attached in the backdoor boot flow,
+# so its spi_slave port spams "device #0 is not connected" on every probe.
+if $TARGET == "universal" {
+    $sdm.xspi_shim_phy.port.spi_slave[0]->log_group_mask = 0
+}
+
+# Enable SDM clocks (skip for universal RAM backdoor — not needed for SPL/U-Boot path).
+if not (($TARGET == "universal") and ($BOOT_METHOD == "backdoor")) {
+    write-device-reg ($sdm_s + ".clkmgr.bank.clk_mgr_regs.ENS") 0x3FFFFF
+}
+
+# ----------------------------------------------------------------------------
+# XSPI pinmux configuration (optional — not required for RAM backdoor boot) (pinmux path differs: universal=sdm.pinmux,
+# mudv=sdm.ana.pinmux; handled by $pinmux_s above).
+#
+# The agilex72-universal km_sdm_pinmux model renamed the pin-select registers:
+# old PIN(n)SEL now maps by offset to PIN_IO_x_SEL[n-7] (PIN1..PIN6 became the
+# named PIN_IO_{TDO,TCK,TDI,TMS,NCONFIG,REFCLK}_SEL). Offsets are unchanged, so
+# only the names differ. mudv keeps the legacy PIN(n)SEL names.
+# ----------------------------------------------------------------------------
+if $TARGET == "mudv" {
+    try {
+        write-device-reg ($pinmux_s + ".bank.regs.PIN18SEL") data = 0x1
+        write-device-reg ($pinmux_s + ".bank.regs.PIN7SEL")  data = 0x2
+        write-device-reg ($pinmux_s + ".bank.regs.PIN10SEL") data = 0x2
+        write-device-reg ($pinmux_s + ".bank.regs.PIN11SEL") data = 0x2
+        write-device-reg ($pinmux_s + ".bank.regs.PIN12SEL") data = 0x2
+        write-device-reg ($pinmux_s + ".bank.regs.PIN13SEL") data = 0x2
+        write-device-reg ($pinmux_s + ".bank.regs.PIN14SEL") data = 0x2
+        write-device-reg ($pinmux_s + ".bank.regs.PIN15SEL") data = 0x2
+        write-device-reg ($pinmux_s + ".bank.regs.PIN16SEL") data = 0x2
+        write-device-reg ($pinmux_s + ".bank.regs.PIN17SEL") data = 0x2
+        write-device-reg ($pinmux_s + ".bank.regs.PIN18SEL") data = 0x2
+        write-device-reg ($pinmux_s + ".bank.regs.PIN19SEL") data = 0x2
+        write-device-reg ($pinmux_s + ".bank.regs.PIN20SEL") data = 0x2
+        write-device-reg ($pinmux_s + ".bank.regs.PIN21SEL") data = 0x2
+        write-device-reg ($pinmux_s + ".bank.regs.PIN22SEL") data = 0x2
+        write-device-reg ($pinmux_s + ".bank.regs.PIN26SEL") data = 0x2
+    } except {
+        echo "WARNING: mudv SDM pinmux setup failed — continuing"
+    }
+} else {
+    echo "Skipping universal SDM pinmux (not required for RAM backdoor boot on km-hps)"
+}
+
+# Quiet TZ/SAI logging.
+$hps.hsp.apu_sysmgr.tz2sai_mnoc0.log-level -r 0
+$hps.hsp.apu_sysmgr.tz2sai_mnoc1.log-level -r 0
+$hps.hsp.hsp_sysmgr.tz2sai_rnoc.log-level -r 0
+$hps.hsp.hsp_sysmgr.tz2sai_mnoc.log-level -r 0
+$sdm.saichecker_sdm_io_noc.log-level -r 0
+$sdm.saichecker_mcsr.log-level -r 0
+
+# ----------------------------------------------------------------------------
+# Boot.
+# ----------------------------------------------------------------------------
+if $AUTO_BOOT {
+    # Capture the HPS APU UART console to a log file.
+    $con.capture-start filename = $UART_LOG
+
+    if $BOOT_METHOD == "backdoor" {
+        # Drive U-Boot: interrupt autoboot, backdoor-load images, booti.
+        # U-Boot's console input FIFO is small, so feed commands in short
+        # chunks and wait for each chunk to echo before sending the next.
+        script-branch "km-backdoor-boot" {
+            $con.bp-wait-for-console-string "Hit any key to stop autoboot"
+            $con.input "\n"
+            $con.bp-wait-for-console-string $uboot_prompt
+
+            # --- Full-PPU SMP workaround (Simics only) ----------------------
+            # The KM ATF wakes each secondary via its per-core DSU PPU but never
+            # powers the DSU *cluster* PPU. The Simics km_hps_dsu_120 model
+            # enforces the Arm DSU power hierarchy, so a core PPU stalls
+            # ("core N ON stalled: cluster in OFF"), PWSR never reaches ON, the
+            # reset-release is never raised and the secondary never starts
+            # (Linux: "CPUn: failed in unknown state : 0x0"). Power the DSU
+            # cluster PPU ON here (PWPR<-0x8 @ KM_CORE_PPU_BASE+0x30000 =
+            # 0x08030000) once we're at the U-Boot prompt - after SPL/ATF
+            # resets, before Linux issues PSCI CPU_ON - so every core PPU can
+            # complete ON and all 4 CPUs come online. Harmless on
+            # silicon/emulator, where the cluster is already powered.
+            $hps.apu.phys_mem.write address = 0x08030000 value = 0x8 size = 4
+
+            # Backdoor-load kernel, initrd (ext2 ramdisk) and device tree.
+            $hps.apu.phys_mem.load-file $kernel_image $kernel_load_addr
+            $hps.apu.phys_mem.load-file $initrd_image $initrd_load_addr
+            $hps.apu.phys_mem.load-file $dtb_image    $dtb_load_addr
+
+            # bootargs (chunked). The initrd is a ~200MB ext2 ramdisk, so
+            # ramdisk_size=1000000 (KB, ~976MB) is REQUIRED to enlarge /dev/ram0
+            # beyond the compiled-in CONFIG_BLK_DEV_RAM_SIZE=4096 (4MB) default;
+            # without it the kernel reports "bad geometry ... exceeds size of
+            # device (4096 blocks)" and cannot mount root.
+            # Every chunk ends with a trailing space so adjacent kernel params
+            # don't merge. (arm64.nosve removed to exercise SVE in Linux.)
+            $con.input "setenv bootargs "
+            $con.bp-wait-for-console-string "setenv bootargs"
+            $con.input "console=ttyS0,115200 "
+            $con.bp-wait-for-console-string "115200"
+            $con.input "initrd=0x90000000 "
+            $con.bp-wait-for-console-string "initrd=0x90000000"
+            $con.input "root=/dev/ram0 rw "
+            $con.bp-wait-for-console-string "ram0 rw"
+            if ($DUMP_CPUINFO or $SMMU_DMA_TEST or $SDMMC_SMMU_TEST or $SDMMC_BOTH) {
+                # init=/bin/sh drops straight to a root shell (no getty/login),
+                # so we can script commands immediately after boot (cpuinfo dump
+                # or the SMMU DMA test).
+                $con.input "init=/bin/sh "
+                $con.bp-wait-for-console-string "init=/bin/sh"
+            } else {
+                $con.input "init=/init "
+                $con.bp-wait-for-console-string "/init"
+            }
+            $con.input "earlycon "
+            $con.bp-wait-for-console-string "earlycon"
+            $con.input "panic=-1 "
+            $con.bp-wait-for-console-string "panic=-1"
+            $con.input "kvm-arm.mode=nvhe "
+            $con.bp-wait-for-console-string "nvhe"
+            $con.input "ramdisk_size=1000000 "
+            $con.bp-wait-for-console-string "ramdisk_size=1000000"
+            # SMP enabled: the DSU cluster PPU is powered ON above (0x08030000)
+            # and Linux DT uses enable-method = "psci" for cpu0..cpu3.
+            $con.input "maxcpus=4 "
+            $con.bp-wait-for-console-string "maxcpus=4"
+            if $EXTRA_BOOTARGS != "" {
+                $con.input " "
+                $con.input $EXTRA_BOOTARGS
+                $con.bp-wait-for-console-string $EXTRA_BOOTARGS
+            }
+            $con.input "\n"
+            $con.bp-wait-for-console-string $uboot_prompt
+
+            # Launch the kernel (chunked). Addresses must match the loads above.
+            $con.input "booti "
+            $con.bp-wait-for-console-string "booti"
+            $con.input "0x82000000 "
+            $con.bp-wait-for-console-string "0x82000000"
+            $con.input "0x90000000 "
+            $con.bp-wait-for-console-string "0x90000000"
+            $con.input "0x88000000"
+            $con.bp-wait-for-console-string "0x88000000"
+            $con.input "\n"
+
+            if $DUMP_CPUINFO {
+                # Wait for the root shell prompt, then dump /proc/cpuinfo.
+                # NOTE 1: the Linux serial console (unlike U-Boot) needs a
+                # carriage return (\r) to submit a typed line - sending \n only
+                # echoes the text without executing it.
+                # NOTE 2: init=/bin/sh skips the normal init scripts, so /proc
+                # is not mounted yet - mount it in the same command line.
+                $con.bp-wait-for-console-string "/ #"
+                $con.input "mount -t proc proc /proc; cat /proc/cpuinfo\r"
+                # Wait for "CPU revision" - the LAST field of the arm64 cpuinfo
+                # block. It only appears in cat's output (not in the typed
+                # command), so this won't false-match the shell command echo,
+                # and seeing it guarantees the whole block has printed.
+                $con.bp-wait-for-console-string "CPU revision"
+                # Capture complete - exit immediately instead of idling so the
+                # per-boot validation finishes in well under a minute.
+                quit
+            }
+            if $SMMU_DMA_TEST {
+                # SMMU DMA validation: gmac1 (eth0) is an SMMU master
+                # (iommus = <&smmu 2>). Bringing the interface up and driving
+                # traffic forces the NIC DMA engine to read/write descriptor
+                # rings and packet buffers via IOVAs the SMMU must translate.
+                # init=/bin/sh skips init scripts, so mount proc/sysfs first.
+                $con.bp-wait-for-console-string "/ #"
+                $con.input "mount -t proc proc /proc; mount -t sysfs sys /sys\r"
+                $con.bp-wait-for-console-string "/ #"
+                # Show interfaces and confirm eth0 is bound to an IOMMU group.
+                $con.input "ls /sys/class/net; ls -l /sys/class/net/eth0/device/iommu_group\r"
+                $con.bp-wait-for-console-string "/ #"
+                # Bring eth0 up (starts RX-ring + descriptor DMA) and address it.
+                $con.input "ip link set eth0 up; ip addr add 10.10.0.100/24 dev eth0\r"
+                $con.bp-wait-for-console-string "/ #"
+                # Generate TX/RX DMA. -W 2 bounds the wait so the branch can't
+                # hang if there is no reply; the summary line always prints.
+                $con.input "ping -c 3 -W 2 10.10.0.1; echo SMMU_PING_RC=$?\r"
+                $con.bp-wait-for-console-string "SMMU_PING_RC="
+                # (Test A) With CONFIG_ARM_SMMU_V3_PMU=y the SMMU PMCG perf
+                # devices appear - proof the PMU driver bound to the SMMU's
+                # performance-counter hardware (SMMU discoverable / in datapath).
+                $con.input "ls /sys/bus/event_source/devices/ | grep -i smmu; echo SMMU_PMCG_DONE\r"
+                $con.bp-wait-for-console-string "SMMU_PMCG_DONE"
+                # (Test C) stmmac MAC-loopback self-test (CONFIG_STMMAC_SELFTESTS
+                # =y): DMAs packets out and back through SMMU-translated buffers
+                # and verifies the payload - strongest functional proof, needs no
+                # external peer. Requires an 'ethtool' binary in the rootfs.
+                $con.input "ethtool -t eth0 offline; echo SMMU_ETHTOOL_RC=$?\r"
+                $con.bp-wait-for-console-string "SMMU_ETHTOOL_RC="
+                # Dump the SMMU/IOMMU kernel log; a clean run shows the probe
+                # lines and NO "event 0x.." translation faults.
+                $con.input "dmesg | grep -iE 'smmu|iommu'\r"
+                $con.bp-wait-for-console-string "/ #"
+                $con.input "echo SMMU_DMA_TEST_DONE\r"
+                $con.bp-wait-for-console-string "SMMU_DMA_TEST_DONE"
+                quit
+            }
+            if $SDMMC_SMMU_TEST {
+                # SDMMC DMA validation: mmc0 (mmc@9000000) is an SMMU master
+                # (iommus = <&smmu 5>). Reading the attached SD card drives the
+                # SDHCI/ADMA2 DMA engine, which fetches ADMA descriptors and
+                # transfers block data through IOVAs the SMMU must translate.
+                # init=/bin/sh skips init scripts, so mount proc/sysfs first.
+                $con.bp-wait-for-console-string "/ #"
+                $con.input "mount -t proc proc /proc; mount -t sysfs sys /sys\r"
+                $con.bp-wait-for-console-string "/ #"
+                # Confirm both controllers probed and are bound to IOMMU groups
+                # (mmc0=stream5, mmc1=stream6). The card is attached to mmc1.
+                $con.input "ls /sys/class/mmc_host; ls -l /sys/bus/platform/devices/9000000.mmc/iommu_group /sys/bus/platform/devices/9004000.mmc/iommu_group; echo SDMMC_GRP_DONE\r"
+                $con.bp-wait-for-console-string "SDMMC_GRP_DONE"
+                # Confirm the card enumerated as a block device. The kernel
+                # mmcN index can swap by probe order, so pick whichever
+                # mmcblk node exists.
+                $con.input "cat /proc/partitions; echo SDMMC_PART_DONE\r"
+                $con.bp-wait-for-console-string "SDMMC_PART_DONE"
+                # Drive real DMA: read 8 MiB off the card via ADMA2. RC=0 means
+                # the transfers completed and the data reached the CPU buffer.
+                $con.input "D=/dev/mmcblk0; [ -b $D ] || D=/dev/mmcblk1; dd if=$D of=/dev/null bs=1M count=8; echo SDMMC_DD_RC=$?\r"
+                $con.bp-wait-for-console-string "SDMMC_DD_RC="
+                # Dump the SMMU/IOMMU log; a clean run shows the mmc device
+                # attached to a translated domain and NO "event 0x.." faults.
+                $con.input "dmesg | grep -iE 'smmu|iommu'\r"
+                $con.bp-wait-for-console-string "/ #"
+                $con.input "echo SDMMC_SMMU_TEST_DONE\r"
+                $con.bp-wait-for-console-string "SDMMC_SMMU_TEST_DONE"
+                quit
+            }
+            if $SDMMC_BOTH {
+                # SDMMC_BOTH validation: BOTH controllers are SMMU masters with
+                # DISTINCT StreamIDs - mmc0 (mmc@9000000, iommus=<&smmu 5>) and
+                # mmc1 (mmc@9004000, iommus=<&smmu 6>). Each has its own card, so
+                # both ADMA2 engines drive DMA through separately-translated
+                # streams. init=/bin/sh skips init scripts, so mount fs first.
+                $con.bp-wait-for-console-string "/ #"
+                $con.input "mount -t proc proc /proc; mount -t sysfs sys /sys\r"
+                $con.bp-wait-for-console-string "/ #"
+                # Each controller's IOMMU group. mmc0 and mmc1 must be in
+                # DIFFERENT groups (proof of distinct SIDs 5 and 6) and type=DMA.
+                $con.input "for c in 9000000.mmc 9004000.mmc; do g=$(readlink /sys/bus/platform/devices/$c/iommu_group | sed 's:.*/::'); echo GRP $c=$g type=$(cat /sys/kernel/iommu_groups/$g/type 2>/dev/null); done; echo SDMMC_BOTH_GRP_DONE\r"
+                $con.bp-wait-for-console-string "SDMMC_BOTH_GRP_DONE"
+                # Both cards must enumerate as block devices.
+                $con.input "cat /proc/partitions; echo SDMMC_BOTH_PART_DONE\r"
+                $con.bp-wait-for-console-string "SDMMC_BOTH_PART_DONE"
+                # Drive real ADMA2 DMA on EACH card that enumerated.
+                $con.input "for D in /dev/mmcblk0 /dev/mmcblk1; do [ -b $D ] && { dd if=$D of=/dev/null bs=1M count=8 2>/dev/null; echo DDRC $D=$?; }; done; echo SDMMC_BOTH_DD_DONE\r"
+                $con.bp-wait-for-console-string "SDMMC_BOTH_DD_DONE"
+                # SMMU/IOMMU + mmc probe log for the record.
+                $con.input "dmesg | grep -iE 'smmu|iommu|9000000.mmc|9004000.mmc'\r"
+                $con.bp-wait-for-console-string "/ #"
+                # Decisive: no faults / descriptor errors on either controller.
+                $con.input "dmesg | grep -iE 'smmu.*(fault|event 0x)|Invalid descriptor|ADMA error|mmc[0-9]: error'; echo SDMMC_BOTH_FAULT_SCAN_DONE\r"
+                $con.bp-wait-for-console-string "SDMMC_BOTH_FAULT_SCAN_DONE"
+                $con.input "echo SDMMC_BOTH_TEST_DONE\r"
+                $con.bp-wait-for-console-string "SDMMC_BOTH_TEST_DONE"
+                quit
+            }
+        }
+    } else {
+        if $BOOT_METHOD == "baremetal" {
+            # Baremetal SVE test/debug firmware: let SPL+ATF+U-Boot bring the
+            # core up (UART initialised, DRAM trained), interrupt autoboot,
+            # backdoor-load the payload into DRAM, then `go` to it. The firmware
+            # detects/enables SVE and prints greppable result sentinels.
+            if not (lookup-file $BM_IMAGE -query) {
+                echo "ERROR: baremetal image %s not found - build it first:" % $BM_IMAGE
+                echo "  (cd ../armv9/baremetal && make && make deploy)"
+                exit 1
+            }
+            script-branch "km-baremetal-boot" {
+                $con.bp-wait-for-console-string "Hit any key to stop autoboot"
+                $con.input "\n"
+                $con.bp-wait-for-console-string $uboot_prompt
+
+                $hps.apu.phys_mem.load-file $BM_IMAGE $BM_LOAD_ADDR
+                local $bm_addr_str = "0x%x" % $BM_LOAD_ADDR
+                echo "Baremetal payload %s loaded at %s" % [$BM_IMAGE, $bm_addr_str]
+
+                # `go <addr>` jumps to the payload at U-Boot's current EL.
+                $con.input "go "
+                $con.bp-wait-for-console-string "go"
+                $con.input $bm_addr_str
+                $con.bp-wait-for-console-string $bm_addr_str
+                $con.input "\n"
+
+                # Wait for the firmware's completion sentinel.
+                $con.bp-wait-for-console-string "BAREMETAL: DONE"
+                if $BM_QUIT {
+                    quit
+                } else {
+                    echo "Baremetal SVE test finished (BAREMETAL: DONE)."
+                    echo "Sim left running for debug - Ctrl-C for the Simics prompt."
+                }
+            }
+        } else {
+            # SD boot: let U-Boot autoboot from the .wic image (no intervention).
+            echo "SD boot: U-Boot will autoboot from %s" % $sd_image
+        }
+    }
+
+    if $SDMMC_SMMU_TEST {
+        log-level system.board.fpga.hps.smmu 4
+        log-level system.board.fpga.hps.smmu.bank.tcu 4
+        log-level system.board.fpga.hps.io_smmu_access_marker 4
+        log-level system.board.fpga.hps.noc_smmu_access_marker 4
+    }
+
+    run
+} else {
+    echo "AUTO_BOOT disabled - stopping after platform setup."
+    echo "Type 'run', wait for the U-Boot prompt, then drive boot manually."
+    echo "Backdoor example:"
+    echo "  %s.apu.phys_mem.load-file %s 0x82000000" % [$hps_s, $kernel_image]
+    echo "  %s.apu.phys_mem.load-file %s 0x90000000" % [$hps_s, $initrd_image]
+    echo "  %s.apu.phys_mem.load-file %s 0x88000000" % [$hps_s, $dtb_image]
+    echo ""
+    echo "Then at the U-Boot prompt (paste these two commands):"
+    echo "  setenv bootargs console=ttyS0,115200 initrd=0x90000000 root=/dev/ram0 rw init=/init earlycon panic=-1 kvm-arm.mode=nvhe ramdisk_size=1000000 maxcpus=4"
+    echo "  booti 0x82000000 0x90000000 0x88000000"
+    echo ""
+    echo "Baremetal SVE firmware (BOOT_METHOD=baremetal) - at the U-Boot prompt:"
+    echo "  %s.apu.phys_mem.load-file %s 0x%x   # (run from the Simics prompt)" % [$hps_s, $BM_IMAGE, $BM_LOAD_ADDR]
+    echo "  go 0x%x                              # (then at the U-Boot prompt)" % $BM_LOAD_ADDR
+}

@@ -13,21 +13,35 @@ Validated with supersmasher `sample-vsip-memsrc-km.cfg` → **PASS** on KM OSBV 
 
 ## Install into a Simics project (new Simics / fresh km-hps)
 
+This repo is the **Simics-host kit**: device models **and** mainline km-hps scripts
+(`stage-artifact`, `run-*-smp`, `fetch-km-artifacts`, `set_simics_env_main.sh`, …).
+
+Boot binaries stay on the HTTP/NFS share (published from Yocto `scripts/artifacts/`).
+
 ```bash
 git clone https://github.com/aalisov/frameworks.validation.osv-km-simics-models.git
 cd frameworks.validation.osv-km-simics-models
-./setup-into-simics-project.sh                  # → ~/km-hps by default
-# or:
-./setup-into-simics-project.sh -p /path/to/simics-project --force
+./setup-into-simics-project.sh -p ~/km-hps --force
 ```
 
 The script:
 
-1. Symlinks (or `--copy`) `vsip-memsrc` and `p3t1755` into `PROJECT/modules/`
-2. Sources `set_simics_env_main.sh` when present
-3. Builds the modules (`make`)
+1. Copies `km-hps-files/` → project root + `scripts/` (env, stage, run, fetch)
+2. Symlinks (or `--copy`) `vsip-memsrc` and `p3t1755` into `PROJECT/modules/`
+3. Sources `set_simics_env_main.sh` and builds the modules (`make`)
 
-Useful flags: `--force` (replace existing), `--copy`, `--no-build`, `--env-script FILE`.
+Useful flags: `--force`, `--copy`, `--no-build`, `--scripts-only`, `--models-only`, `--env-script FILE`.
+
+### Stage + run after install
+
+```bash
+cd ~/km-hps && source ./set_simics_env_main.sh
+./scripts/stage-artifact.sh osbv --from http://alisubun1.sj.altera.com/share/KM --date latest
+./scripts/run-osbv-smp.sh
+telnet 127.0.0.1 9123
+```
+
+See `km-hps-files/scripts/README.main-smp.md` for SMP/SVE details.
 
 ## Use in km-hps (manual)
 

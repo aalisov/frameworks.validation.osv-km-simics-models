@@ -1,0 +1,138 @@
+# =============================================================================
+# KM emul on intel-fpga-main: SMP-on + SVE-on (maxcpus=4)
+# =============================================================================
+#
+# Requires: source ~/km-hps/set_simics_env_main.sh
+# Target:   targets/km/agilex72-universal-fixed.simics (km_hps_dsu_120)
+#
+# Initrd: default images/emul/initrd_emul.uboot is no-SVE busybox — pass
+#   bootargs="nosmp arm64.nosve ..." or use SVE userspace initrd (Yocto SVE build).
+#   For full SMP+SVE, prefer ./scripts/run-km-generic-main.sh emul DUMP_CPUINFO=TRUE
+#
+#   ./scripts/run-emul-smp.sh
+#   telnet 127.0.0.1 9123
+# =============================================================================
+
+add-directory "%script%"
+$script_dir = (resolve-file "%script%")
+$project_dir = $script_dir + "/.."
+
+if not defined artifacts_dir {
+    if defined payload_dir {
+        $artifacts_dir = $payload_dir
+    } else {
+        $artifacts_dir = $project_dir + "/images/emul"
+    }
+}
+add-directory $artifacts_dir
+echo "artifacts_dir = %s" % $artifacts_dir
+echo "mode: main SMP+SVE (maxcpus=4; EMUL_NOSMP/EMUL_NOSVE via run-emul-smp.sh)"
+
+if not defined spl_name    { $spl_name    = "u-boot-spl-dtb.bin" }
+if not defined ssbl_name   { $ssbl_name   = "u-boot.itb" }
+if not defined kernel_name { $kernel_name = "Image" }
+if not defined dtb_name    { $dtb_name    = "socfpga_km.dtb" }
+if not defined initrd_name { $initrd_name = "initrd_emul.uboot" }
+
+$spl_bin = $artifacts_dir + "/" + $spl_name
+$ssbl_image = $artifacts_dir + "/" + $ssbl_name
+$kernel_image = $artifacts_dir + "/" + $kernel_name
+$dtb_image = $artifacts_dir + "/" + $dtb_name
+$initrd_image = $artifacts_dir + "/" + $initrd_name
+
+# Default mainline: SMP + SVE on (maxcpus=4, no arm64.nosve).
+# Override via run-emul-smp.sh: EMUL_NOSMP=1 and/or EMUL_NOSVE=1.
+if not defined bootargs {
+    $bootargs = "earlycon console=ttyS0,115200n8 root=/dev/ram0 rw init=/init ramdisk_size=1000000 maxcpus=4"
+}
+
+if not defined sdm_hmod_fw_image_filename {
+    $sdm_hmod_fw_image_filename = ""
+}
+if $sdm_hmod_fw_image_filename != "" {
+    if not (lookup-file $sdm_hmod_fw_image_filename -query) {
+        echo "WARNING: SDM HMOD FW not found: %s" % $sdm_hmod_fw_image_filename
+        $sdm_hmod_fw_image_filename = ""
+    }
+}
+
+output-radix base = 16
+
+$hps_apu_fsbl_image_filename = ""
+$create_hps_sd_card = FALSE
+$create_hps_sd_card1 = FALSE
+$create_hps_eth0_network = FALSE
+$create_hps_apu_serial0_console = TRUE
+$create_hps_apu_serial1_console = FALSE
+$create_hps_apu_serial2_console = FALSE
+
+if not defined console_telnet_port { $console_telnet_port = 9123 }
+
+foreach $p in [$spl_bin, $ssbl_image, $kernel_image, $dtb_image, $initrd_image] {
+    if not (lookup-file $p -query) {
+        echo "ERROR: missing %s" % $p
+        echo "Run: ./scripts/stage-artifact.sh emul --deploy .../collected-binaries/emul"
+        exit 1
+    }
+}
+
+$spl_bin = (lookup-file $spl_bin)
+$ssbl_image = (lookup-file $ssbl_image)
+$kernel_image = (lookup-file $kernel_image)
+$dtb_image = (lookup-file $dtb_image)
+$initrd_image = (lookup-file $initrd_image)
+
+echo "SPL     -> %s" % $spl_bin
+echo "ITB     -> %s" % $ssbl_image
+echo "Image   -> %s" % $kernel_image
+echo "DTB     -> %s" % $dtb_image
+echo "initrd  -> %s" % $initrd_image
+echo "bootargs-> %s" % $bootargs
+
+run-command-file (sim->workspace + "/targets/km/agilex72-universal-fixed.simics")
+
+$hps = system.board.fpga.hps
+$con = $hps.lsp.console0.con
+$con.show
+if $console_telnet_port != 0 {
+    $con.telnet-setup $console_telnet_port
+    echo "UART0 telnet: telnet 127.0.0.1 %d" % $console_telnet_port
+}
+
+$hps.apu.phys_mem.load-file $spl_bin 0x0
+psel $hps.apu.mpu.cores[0]
+penable
+enable-debugger
+load-file $ssbl_image 0x82000000
+load-file $dtb_image 0x88000000
+
+echo "=== Stage-1: run until SOCFPGA_KM # ==="
+
+script-branch {
+    bp.console_string.wait-then-write $con "Hit any key to stop autoboot" "\r"
+}
+script-branch {
+    bp.console_string.wait-for $con "SOCFPGA_KM # "
+    echo "=== U-Boot prompt — load Image + initrd ==="
+    stop
+}
+run
+
+load-file $kernel_image 0x82000000
+load-file $initrd_image 0x90000000
+
+echo "Cluster PPU ON @ 0x08030000 (DSU power hierarchy for Simics)"
+$hps.apu.phys_mem.write address = 0x08030000 value = 0x8 size = 4
+
+echo "Injecting bootargs + booti (SMP maxcpus=4)"
+$con.input ("setenv bootargs " + $bootargs + "\r")
+script-branch {
+    bp.console_string.wait-for $con "SOCFPGA_KM # "
+    $con.input "printenv bootargs\r"
+}
+script-branch {
+    bp.console_string.wait-for $con "SOCFPGA_KM # "
+    $con.input "booti 0x82000000 0x90000000 0x88000000\r"
+    echo "=== booti issued — expect nproc=4 ==="
+}
+run

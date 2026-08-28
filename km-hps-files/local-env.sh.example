@@ -1,0 +1,14 @@
+# Optional machine-local Simics paths. Copy to local-env.sh and edit.
+#
+#   cp local-env.sh.example local-env.sh
+#
+# local-env.sh is gitignored when possible; do not commit host-specific paths.
+
+# Required if auto-detect fails:
+# export SIMICS_BASE="$HOME/intelFPGA_pro/intel-fpga-ext_26.3/simics/simics-7.89.0"
+
+# Parent of platforms/ (usually dirname of SIMICS_BASE):
+# export SIMICS_FPGA_ROOT="$HOME/intelFPGA_pro/intel-fpga-ext_26.3/simics"
+
+# Optional SDM HMOD firmware override:
+# export SDM_HMOD_FW="$SIMICS_FPGA_ROOT/platforms/agilex72-universal/binaries/sdm_hmod_fw/sdm_hmod_fw.hex"

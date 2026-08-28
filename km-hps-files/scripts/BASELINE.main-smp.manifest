@@ -1,0 +1,24 @@
+# Validated intel-fpga-main SMP-on + SVE-on — 2026-08-24
+# Env: source set_simics_env_main.sh
+# Expect: nproc=4 ; BL31 "PPU Wake up done!" ; km_hps_dsu_120 in model
+
+[env]
+SIMICS_BASE     intel-fpga-main*/y/simics/simics-*
+packages        simics-intelfpga-internal (km_hps_dsu_120)
+bootargs_emul   earlycon console=ttyS0,115200n8 root=/dev/ram0 rw init=/init ramdisk_size=1000000 maxcpus=4
+bootargs_emul_nosve  earlycon arm64.nosve console=ttyS0,115200n8 root=/dev/ram0 rw init=/init ramdisk_size=1000000 maxcpus=4
+bootargs_osbv   console=ttyS0,115200n8 root=/dev/mmcblk0p2 rw rootwait maxcpus=4 mem=1792M
+cluster_ppu     phys_mem.write 0x08030000 = 0x8 before booti
+
+[scripts]
+run-emul-smp.sh           boot-to-linux-smp.simics
+run-osbv-smp.sh           boot-to-osbv-smp-linux.simics
+run-km-generic-main.sh    km_generic.simics (full SMP path)
+stage-artifact.sh         copy collect → images/{emul,osbv}
+set_simics_env_main.sh    project root
+
+[artifacts]
+FIT must remain Yocto external-data (bl31-sve for osbv; emul may use osbv SVE FIT).
+
+[26.3 nosmp baseline]
+Archived under scripts/legacy-26.3/ (framework + km-hps). Roll back git commit to restore active 26.3 tree.

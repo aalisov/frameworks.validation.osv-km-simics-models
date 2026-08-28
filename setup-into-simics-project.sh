@@ -166,6 +166,17 @@ install_scripts() {
   if [[ -f "$PROJECT/scripts/README.main-smp.md" ]]; then
     cp -a "$PROJECT/scripts/README.main-smp.md" "$PROJECT/README.KM-SIMICS.md"
   fi
+
+  # targets/km (agilex72-universal-fixed.simics + SMP fixup wrapper)
+  if [[ -d "$HPS_FILES/targets" ]]; then
+    mkdir -p "$PROJECT/targets"
+    if command -v rsync >/dev/null 2>&1; then
+      rsync -a "$HPS_FILES/targets/" "$PROJECT/targets/"
+    else
+      cp -a "$HPS_FILES/targets/." "$PROJECT/targets/"
+    fi
+    info "  + targets/ (from km-hps-files/targets)"
+  fi
 }
 
 info "Repo:     $REPO_ROOT"

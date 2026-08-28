@@ -1,0 +1,25 @@
+# KM agilex72-universal with Simics SMP fixups.
+#
+# Prefer the platform target that matches the active Simics FPGA package
+# (intel-fpga_main → km_hps_dsu_120). Fall back to the project-local copy
+# used with intel-fpga-ext 26.3.
+#
+# Cluster PPU backdoor (scripts):
+#   $hps.apu.phys_mem.write address = 0x08030000 value = 0x8 size = 4
+
+@import os
+@ _fpga = os.environ.get("SIMICS_FPGA_ROOT", "")
+@ _plat = os.path.join(_fpga, "platforms/agilex72-universal/targets/agilex72-universal/agilex72-universal.simics")
+@ _proj = os.path.join(os.environ.get("SIMICS_PROJECT", simics.SIM_get_object("sim").project), "targets/agilex72-universal/agilex72-universal.simics")
+# Prefer platform target on intel-fpga_main (newer secmgr API). On intel-fpga-ext
+# 26.3, prefer the project-local copy so a stale SIMICS_FPGA_ROOT / mixed
+# package-list cannot load a platform script against the wrong secmgr model.
+@ _use_plat = os.path.isfile(_plat) and ("intel-fpga-ext" not in _fpga.replace("\\", "/"))
+@ simenv.km_universal_target = _plat if _use_plat else (_proj if os.path.isfile(_proj) else _plat)
+@print("km universal target:", simenv.km_universal_target)
+@print("SIMICS_FPGA_ROOT:", _fpga or "<unset>")
+
+run-command-file $km_universal_target
+
+@exec(open(__import__("os").environ["SIMICS_PROJECT"] + "/scripts/km_simics_smp_fixup.py").read())
+@print(km_simics_smp_fixup())

@@ -89,7 +89,7 @@ echo "DTB     -> %s" % $dtb_image
 echo "initrd  -> %s" % $initrd_image
 echo "bootargs-> %s" % $bootargs
 
-run-command-file (sim->workspace + "/targets/km/agilex72-universal-fixed.simics")
+run-command-file (sim->project + "/targets/km/agilex72-universal-fixed.simics")
 
 $hps = system.board.fpga.hps
 $con = $hps.lsp.console0.con

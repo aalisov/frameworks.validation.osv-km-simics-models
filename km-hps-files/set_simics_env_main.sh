@@ -40,11 +40,23 @@ _km_hps_is_main_tree() {
   esac
 }
 
+# True if SIMICS_FPGA_ROOT (parent of simics-N) has the mainline FPGA package set.
+_km_hps_main_packages_ok() {
+  local root="$1"
+  [[ -d "$(ls -1d "$root"/simics-gdb-* 2>/dev/null | sort -V -r | head -1)" ]] || return 1
+  [[ -d "$(ls -1d "$root"/simics-python-* 2>/dev/null | sort -V -r | head -1)" ]] || return 1
+  [[ -d "$(ls -1d "$root"/simics-crypto-engine-* 2>/dev/null | sort -V -r | head -1)" ]] || return 1
+  # Prefer internal (km_hps_dsu_120); some drops only ship intelfpga-ext (wrong for SMP).
+  [[ -d "$(ls -1d "$root"/simics-intelfpga-internal-* 2>/dev/null | sort -V -r | head -1)" ]] || return 1
+  return 0
+}
+
 _km_hps_detect_simics_main() {
-  local cand root
+  local cand root fpga_root best="" best_root=""
   if [[ -n "${SIMICS_BASE:-}" && -x "${SIMICS_BASE}/bin/simics" ]] \
     && _km_hps_is_main_tree "${SIMICS_BASE}"; then
-    export SIMICS_FPGA_ROOT="${SIMICS_FPGA_ROOT:-$(cd "${SIMICS_BASE}/.." && pwd)}"
+    fpga_root="${SIMICS_FPGA_ROOT:-$(cd "${SIMICS_BASE}/.." && pwd)}"
+    export SIMICS_FPGA_ROOT="$fpga_root"
     return 0
   fi
   unset SIMICS_BASE SIMICS_FPGA_ROOT
@@ -57,28 +69,44 @@ _km_hps_detect_simics_main() {
   do
     [[ -d "$root" ]] || continue
     while IFS= read -r cand; do
-      if [[ -x "${cand}/bin/simics" ]]; then
+      [[ -x "${cand}/bin/simics" ]] || continue
+      fpga_root="$(cd "${cand}/.." && pwd)"
+      # Prefer a tree that already has intelfpga-internal + friends
+      if _km_hps_main_packages_ok "$fpga_root"; then
         export SIMICS_BASE="$cand"
-        export SIMICS_FPGA_ROOT="$(cd "${cand}/.." && pwd)"
+        export SIMICS_FPGA_ROOT="$fpga_root"
         return 0
+      fi
+      # Remember first executable candidate as fallback
+      if [[ -z "$best" ]]; then
+        best="$cand"
+        best_root="$fpga_root"
       fi
     done < <(
       ls -1d \
         "$root"/intel-fpga-main*/y/simics/simics-[0-9]* \
         "$root"/intel-fpga-main*/simics/simics-[0-9]* \
+        "$root"/intel-fpga_main*/y/simics/simics-[0-9]* \
         "$root"/intel-fpga_main*/simics/simics-[0-9]* \
-        "$root"/intel-fpga_main/simics/simics-[0-9]* \
+        "$root"/intel-fpga-ext_main*/y/simics/simics-[0-9]* \
         "$root"/intel-fpga-ext_main*/simics/simics-[0-9]* \
+        "$root"/intel-fpga-ext_main/y/simics/simics-[0-9]* \
         "$root"/intel-fpga-ext_main/simics/simics-[0-9]* \
         2>/dev/null | sort -V -r
     )
   done
+  if [[ -n "$best" ]]; then
+    export SIMICS_BASE="$best"
+    export SIMICS_FPGA_ROOT="$best_root"
+    return 0
+  fi
   return 1
 }
 
 if ! _km_hps_detect_simics_main; then
   echo "ERROR: Could not find intel-fpga-main / intel-fpga-ext_main Simics." >&2
   echo "       Set SIMICS_BASE in $SIMICS_PROJECT/local-env-main.sh" >&2
+  echo "       (directory that contains bin/simics, usually .../y/simics/simics-N.N.N)" >&2
   return 1 2>/dev/null || exit 1
 fi
 
@@ -125,6 +153,12 @@ _km_hps_fix_main_packages() {
 
   if [[ -z "$gdb" || -z "$py" || -z "$internal" || -z "$crypto" ]]; then
     echo "ERROR: missing main packages under $SIMICS_FPGA_ROOT" >&2
+    echo "       need: simics-gdb-*, simics-python-*, simics-intelfpga-internal-*, simics-crypto-engine-*" >&2
+    echo "       found:" >&2
+    ls -1d "$SIMICS_FPGA_ROOT"/simics-* 2>/dev/null | sed 's/^/         /' >&2 || echo "         (none)" >&2
+    echo "       Also check sibling .../y/simics/ (full main installs use that path)." >&2
+    echo "       Set SIMICS_BASE in $SIMICS_PROJECT/local-env-main.sh to the simics-N dir" >&2
+    echo "       whose parent contains simics-intelfpga-internal-*." >&2
     return 1
   fi
 

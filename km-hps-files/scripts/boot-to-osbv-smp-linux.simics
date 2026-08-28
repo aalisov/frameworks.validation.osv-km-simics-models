@@ -100,7 +100,7 @@ if (lookup-file $bl31_bin -query) {
 
 $sd_image_filename0 = $sd_image
 
-run-command-file (sim->workspace + "/targets/km/agilex72-universal-fixed.simics")
+run-command-file (sim->project + "/targets/km/agilex72-universal-fixed.simics")
 
 $hps = system.board.fpga.hps
 $con = $hps.lsp.console0.con

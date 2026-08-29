@@ -7,7 +7,7 @@ SIMICS_BASE     intel-fpga-main*/y/simics/simics-*
 packages        simics-intelfpga-internal (km_hps_dsu_120)
 bootargs_emul   earlycon console=ttyS0,115200n8 root=/dev/ram0 rw init=/init ramdisk_size=1000000 maxcpus=4
 bootargs_emul_nosve  earlycon arm64.nosve console=ttyS0,115200n8 root=/dev/ram0 rw init=/init ramdisk_size=1000000 maxcpus=4
-bootargs_osbv   console=ttyS0,115200n8 root=/dev/mmcblk0p2 rw rootwait maxcpus=4 mem=1792M
+bootargs_osbv   console=ttyS0,115200n8 root=/dev/mmcblk0p2 rw rootwait maxcpus=4 mem=968M
 cluster_ppu     phys_mem.write 0x08030000 = 0x8 before booti
 
 [scripts]

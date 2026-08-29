@@ -41,7 +41,8 @@ $dtb_image = $artifacts_dir + "/" + $dtb_name
 $sd_image = $artifacts_dir + "/" + $wic_name
 
 if not defined bootargs {
-    $bootargs = "console=ttyS0,115200n8 root=/dev/mmcblk0p2 rw rootwait maxcpus=4"
+    # mem=968M: same as SM — System RAM ends at 0xbc800000 for allocate_mem_targets -A
+    $bootargs = "console=ttyS0,115200n8 root=/dev/mmcblk0p2 rw rootwait maxcpus=4 mem=968M"
 }
 
 if not defined sdm_hmod_fw_image_filename {

@@ -53,9 +53,20 @@ ln -sfn /path/to/frameworks.validation.osv-km-simics-models/p3t1755 modules/p3t1
 make
 ```
 
-### Board integration (via board_hooks)
+### Board integration (automatic)
 
-In `km-universal-board-comp` (or your board):
+`./setup-into-simics-project.sh -p ~/km-hps --force` imports
+`km-universal-board-comp` from `$SIMICS_FPGA_ROOT/platforms/agilex72-universal/modules/`
+and applies `patches/0001-km-universal-board-comp-VSIP-P3T1755.patch` so the board:
+
+1. Instantiates `vsip_memsrc_0` (`create_vsip_memsrc=True`)
+2. Maps MMIO at `0xF9000000` and routes F2 → `hps.apu.phys_mem`
+3. Adds `p3t1755_0` on I3C0
+
+Without that board rebuild, `SIM_object_iterator` shows no `vsip*` objects and
+supersmasher reports 0% efficiency.
+
+Manual equivalent (if you already imported the board module):
 
 ```python
 # add_objects()

@@ -1,0 +1,105 @@
+--- a/km_universal_board_comp.py
++++ b/km_universal_board_comp.py
+@@ -20,7 +20,7 @@
+ 
+ import simics
+ import comp
+-from comp import StandardConnectorComponent, SimpleConfigAttribute
++from comp import StandardComponent, StandardConnectorComponent, SimpleConfigAttribute
+ 
+ from comp import (
+     EthernetLinkDownConnector,
+@@ -98,6 +98,16 @@
+     ):
+         """Power state for core 3"""
+ 
++    class create_vsip_memsrc(
++        SimpleConfigAttribute(True, "b", simics.Sim_Attr_Optional)
++    ):
++        """Instantiate VSIP mem_source model at 0xF9000000 (OSBV DT overlay)."""
++
++    class vsip_memsrc_base(
++        SimpleConfigAttribute(0xF9000000, "i", simics.Sim_Attr_Optional)
++    ):
++        """Base address for VSIP mem_source MMIO."""
++
+     ########################################################################
+     # Component methods
+     ######################################################################
+@@ -374,6 +384,26 @@
+         self.add_component(
+             "i3c0_device3", "i3c_device_comp", [["pid", 0xFB1122330003], ["dcr", 0xE3]]
+         )
++        if self.create_vsip_memsrc.val:
++            self.add_component(
++                "vsip_memsrc_0",
++                "vsip_memsrc_comp",
++                [["base_addr", self.vsip_memsrc_base.val]],
++            )
++
++        # Minimal P3T1755-compatible temp sensor (I3C0)
++        self.add_component(
++            "p3t1755_0",
++            "p3t1755_comp",
++            [
++                # Match osbv-i3c0dev-nxp1755 DT: sensor@0,236152A0090
++                # and i3cdev I3C_DEVICE(0x11B, 0x152a) + board extra 0x090
++                ["pid", 0x236152A0090],
++                ["dcr", 0x63],
++                ["static_address", 0xFF],  # no static addr (DT reg=<0x0 ...>)
++                ["temperature_c", 25],
++            ],
++        )
+         self.add_component(
+             "i3c1_device1", "i3c_device_comp", [["pid", 0xFB1122550001], ["dcr", 0xC6]]
+         )
+@@ -406,6 +436,10 @@
+             self.get_slot("i3c0_device3.bus_slot"),
+         )
+         self.connect(
++            self.get_slot("i3c_bus[0].dev_slot[4]"),
++            self.get_slot("p3t1755_0.bus_slot"),
++        )
++        self.connect(
+             self.get_slot("i3c_bus[0].i2c_dev_slot[0]"),
+             self.get_slot("eeprom_8b_i2c0.i2c_slot0"),
+         )
+@@ -579,3 +613,38 @@
+             self.get_slot("gpio_loopback.gpio_lb_out15"),
+             self.get_slot("fpga.gpio_in1[20]"),
+         )
++
++    class component(StandardComponent.component):
++        def post_instantiate(self):
++            if not self._up.create_vsip_memsrc.val:
++                return
++            phys_mem = self._up.get_slot("fpga.hps.apu.phys_mem")
++            vsip_mmio = self._up.get_slot("vsip_memsrc_0.mmio")
++            base = self._up.vsip_memsrc_base.val
++            size = 0x40000
++            new_map = list(phys_mem.map)
++            new_map.append([base, vsip_mmio, 0, 0, size])
++            phys_mem.map = new_map
++            simics.SIM_log_info(
++                3,
++                self._up.obj,
++                0,
++                f"Mapped VSIP memsrc MMIO at 0x{base:x} (size 0x{size:x})",
++            )
++            # F2 AXI master must see the same PA map as the CPU (DRAM carveout
++            # at 0xf0000000+, etc.). A private stub RAM only covers 0..size.
++            try:
++                self._up.get_slot("vsip_memsrc_0.dev").f2_mem = phys_mem
++                simics.SIM_log_info(
++                    3,
++                    self._up.obj,
++                    0,
++                    "Routed VSIP memsrc F2 master to hps.apu.phys_mem",
++                )
++            except Exception as exc:  # pylint: disable=broad-except
++                simics.SIM_log_info(
++                    1,
++                    self._up.obj,
++                    0,
++                    f"VSIP F2→phys_mem wire failed: {exc}",
++                )

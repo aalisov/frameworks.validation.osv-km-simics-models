@@ -225,6 +225,26 @@ install_board_with_vsip() {
   info ""
   info "Installing km-universal-board-comp from $src"
   mkdir -p "$board_dir"
+
+  # Board Makefile uses EXTRA_MODULE_VPATH += km/common
+  local km_common_src
+  km_common_src="$(cd "$src/.." && pwd)/km/common"
+  if [[ ! -f "$km_common_src/km_common.py" ]]; then
+    die "missing km/common next to board module: $km_common_src"
+  fi
+  mkdir -p "$PROJECT/modules/km"
+  if [[ -e "$PROJECT/modules/km/common" || -L "$PROJECT/modules/km/common" ]]; then
+    if [[ $FORCE -eq 1 ]]; then
+      rm -rf "$PROJECT/modules/km/common"
+    fi
+  fi
+  if [[ ! -e "$PROJECT/modules/km/common" ]]; then
+    ln -sfn "$km_common_src" "$PROJECT/modules/km/common"
+    info "Linked modules/km/common → $km_common_src"
+  else
+    info "OK  modules/km/common already present"
+  fi
+
   if [[ -f "$board_py" && $FORCE -eq 0 ]] && grep -q 'create_vsip_memsrc' "$board_py" 2>/dev/null; then
     info "OK  board already has create_vsip_memsrc"
     return 0

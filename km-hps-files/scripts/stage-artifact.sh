@@ -2,13 +2,7 @@
 # Stage KM boot binaries into ~/km-hps/images/{emul|osbv} from a Yocto
 # collected-binaries (or deploy) directory.
 #
-#   ./scripts/stage-artifact.sh emul
-#   ./scripts/stage-artifact.sh osbv
-#   ./scripts/stage-artifact.sh emul --deploy ~/WORK/KM/yocto/build/collected-binaries/emul
-#   ./scripts/stage-artifact.sh osbv --deploy /path/to/osbv_sdmmc --out ~/km-hps/images/osbv
-#   ./scripts/stage-artifact.sh osbv --from http://alisubun1.sj.altera.com/share/KM --date latest
-#   ./scripts/stage-artifact.sh emul --from /var/www/html/share/KM --date 2026-08-21
-#
+# Logs:  + UPDATED | = UNCHANGED | ~ KEPT (missing in deploy, kept from OUT)
 # Does NOT mkimage-repack u-boot.itb (/incbin/ breaks SPL→U-Boot).
 set -euo pipefail
 
@@ -41,7 +35,6 @@ EOF
   exit 1
 }
 
-# --- args ---
 FLAVOR="${1:-}"
 [[ -n "$FLAVOR" ]] || usage
 case "$FLAVOR" in
@@ -53,9 +46,9 @@ DEPLOY=""
 FROM=""
 FROM_DATE="latest"
 OUT=""
-FIX_INITRD=-1   # -1 = auto (fix only if /init lacks shebang), 0 = off, 1 = on
+FIX_INITRD=-1
 KEEP_INITRD=0
-INITRD_MODE="both"   # sve | nosve | both (emul only)
+INITRD_MODE="both"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 while [[ $# -gt 0 ]]; do
@@ -101,24 +94,15 @@ fi
 default_deploy() {
   local sub="$1"
   if [[ -n "${COLLECTED:-}" ]]; then
-    if [[ -d "$COLLECTED/$sub" ]]; then
-      echo "$COLLECTED/$sub"
-      return
-    fi
-    if [[ -d "$COLLECTED" ]]; then
-      echo "$COLLECTED"
-      return
-    fi
+    if [[ -d "$COLLECTED/$sub" ]]; then echo "$COLLECTED/$sub"; return; fi
+    if [[ -d "$COLLECTED" ]]; then echo "$COLLECTED"; return; fi
   fi
   local c
   for c in \
     "$HOME/WORK/KM/yocto/build/collected-binaries/$sub" \
     "$HOME/WORK/KM/yocto/collected-binaries/$sub"
   do
-    if [[ -d "$c" ]]; then
-      echo "$c"
-      return
-    fi
+    if [[ -d "$c" ]]; then echo "$c"; return; fi
   done
   return 1
 }
@@ -130,10 +114,7 @@ find_fetch_script() {
     "$SCRIPT_DIR/fetch-km-artifacts.sh" \
     "$KM_HPS/scripts/fetch-km-artifacts.sh"
   do
-    if [[ -x "$c" ]]; then
-      echo "$c"
-      return 0
-    fi
+    if [[ -x "$c" ]]; then echo "$c"; return 0; fi
   done
   return 1
 }
@@ -155,49 +136,82 @@ fi
 
 mkdir -p "$OUT"
 
-# --- helpers ---
-copy_one() {
-  # copy_one SRC_NAME [DST_NAME]
-  local src_name="$1" dst_name="${2:-$1}" src
-  src="$DEPLOY/$src_name"
+file_md5() { md5sum "$1" 2>/dev/null | awk '{print $1}'; }
+
+copy_tracked() {
+  local src="$1"
+  local dst_name="$2"
+  local dst="$OUT/$dst_name"
+  local old new
   [[ -e "$src" ]] || return 1
-  cp -aL "$src" "$OUT/$dst_name"
-  info "  + $dst_name  ($(du -h "$OUT/$dst_name" | awk '{print $1}'))"
-  return 0
+  if [[ -e "$dst" ]]; then
+    old="$(file_md5 "$dst")"
+    new="$(file_md5 "$(readlink -f "$src")")"
+    if [[ -n "$old" && "$old" == "$new" ]]; then
+      info "  = $dst_name  UNCHANGED  ($(du -h "$dst" | awk '{print $1}') md5=${old:0:12}…)"
+      return 0
+    fi
+  fi
+  cp -aL "$src" "$dst"
+  new="$(file_md5 "$dst")"
+  info "  + $dst_name  UPDATED  ($(du -h "$dst" | awk '{print $1}') md5=${new:0:12}… ← $(basename "$src"))"
+}
+
+copy_one() {
+  local src_name="$1"
+  local dst_name="${2:-$1}"
+  [[ -e "$DEPLOY/$src_name" ]] || return 1
+  copy_tracked "$DEPLOY/$src_name" "$dst_name"
 }
 
 find_first() {
-  # print first existing path among names under DEPLOY
   local n
   for n in "$@"; do
-    if [[ -e "$DEPLOY/$n" ]]; then
-      echo "$DEPLOY/$n"
-      return 0
-    fi
+    if [[ -e "$DEPLOY/$n" ]]; then echo "$DEPLOY/$n"; return 0; fi
   done
   return 1
 }
 
+keep_or_die() {
+  local dst_name="$1"
+  local msg="$2"
+  if [[ -e "$OUT/$dst_name" ]]; then
+    info "  ~ $dst_name  KEPT  ($(du -h "$OUT/$dst_name" | awk '{print $1}') md5=$(file_md5 "$OUT/$dst_name" | cut -c1-12)… — not in deploy)"
+    return 0
+  fi
+  die "$msg"
+}
+
 stage_spl() {
-  local src bin="$OUT/u-boot-spl-dtb.bin"
+  local src
+  local bin="$OUT/u-boot-spl-dtb.bin"
   if src="$(find_first u-boot-spl-dtb.bin)"; then
-    cp -aL "$src" "$bin"
-    info "  + u-boot-spl-dtb.bin  ($(du -h "$bin" | awk '{print $1}'))"
+    copy_tracked "$src" u-boot-spl-dtb.bin
   elif src="$(find_first u-boot-spl-dtb.hex u-boot-spl-dtb.hex-km_emu u-boot-spl-dtb.hex-km_emul u-boot-spl-dtb.hex-km_osbv_sdmmc)"; then
     command -v objcopy >/dev/null || die "objcopy needed to convert $(basename "$src")"
-    objcopy -I ihex -O binary "$src" "$bin"
-    info "  + u-boot-spl-dtb.bin  (from $(basename "$src"))"
+    local tmp; tmp="$(mktemp)"
+    objcopy -I ihex -O binary "$src" "$tmp"
+    if [[ -e "$bin" ]] && [[ "$(file_md5 "$bin")" == "$(file_md5 "$tmp")" ]]; then
+      info "  = u-boot-spl-dtb.bin  UNCHANGED  ($(du -h "$bin" | awk '{print $1}') md5=$(file_md5 "$bin" | cut -c1-12)… ← $(basename "$src"))"
+      rm -f "$tmp"
+    else
+      mv "$tmp" "$bin"
+      info "  + u-boot-spl-dtb.bin  UPDATED  ($(du -h "$bin" | awk '{print $1}') md5=$(file_md5 "$bin" | cut -c1-12)… ← $(basename "$src"))"
+    fi
   else
-    die "u-boot-spl-dtb.bin/.hex not found under $DEPLOY"
+    keep_or_die u-boot-spl-dtb.bin \
+      "u-boot-spl-dtb.bin/.hex not found under $DEPLOY (and none staged in $OUT)"
   fi
 }
 
 stage_itb() {
   local src
-  src="$(find_first u-boot.itb u-boot-km_emul.itb u-boot-km_osbv_sdmmc.itb)" \
-    || die "u-boot.itb not found under $DEPLOY"
-  cp -aL "$src" "$OUT/u-boot.itb"
-  info "  + u-boot.itb  ($(du -h "$OUT/u-boot.itb" | awk '{print $1}'))"
+  if src="$(find_first u-boot.itb u-boot-km_emul.itb u-boot-km_osbv_sdmmc.itb)"; then
+    copy_tracked "$src" u-boot.itb
+  else
+    keep_or_die u-boot.itb \
+      "u-boot.itb not found under $DEPLOY (and none staged in $OUT)"
+  fi
 }
 
 stage_bl31() {
@@ -206,11 +220,19 @@ stage_bl31() {
   if [[ -e "$DEPLOY/bl31.bin" ]]; then
     copy_one bl31.bin || true
   elif [[ -e "$OUT/bl31-sve.bin" ]]; then
-    cp -a "$OUT/bl31-sve.bin" "$OUT/bl31.bin"
-    info "  + bl31.bin  (← bl31-sve.bin)"
+    if [[ -e "$OUT/bl31.bin" ]] && [[ "$(file_md5 "$OUT/bl31.bin")" == "$(file_md5 "$OUT/bl31-sve.bin")" ]]; then
+      info "  = bl31.bin  UNCHANGED  (← bl31-sve.bin)"
+    else
+      cp -a "$OUT/bl31-sve.bin" "$OUT/bl31.bin"
+      info "  + bl31.bin  UPDATED  (← bl31-sve.bin)"
+    fi
   elif [[ -e "$OUT/bl31-nosve.bin" ]]; then
-    cp -a "$OUT/bl31-nosve.bin" "$OUT/bl31.bin"
-    info "  + bl31.bin  (← bl31-nosve.bin)"
+    if [[ -e "$OUT/bl31.bin" ]] && [[ "$(file_md5 "$OUT/bl31.bin")" == "$(file_md5 "$OUT/bl31-nosve.bin")" ]]; then
+      info "  = bl31.bin  UNCHANGED  (← bl31-nosve.bin)"
+    else
+      cp -a "$OUT/bl31-nosve.bin" "$OUT/bl31.bin"
+      info "  + bl31.bin  UPDATED  (← bl31-nosve.bin)"
+    fi
   fi
 }
 
@@ -230,7 +252,7 @@ fix_emul_initrd() {
   tmp="$(mktemp -d)"
   work="$tmp/rootfs.ext2"
   dd if="$uboot" of="$work" bs=1 skip=64 status=none
-  cat >"$tmp/init.new" <<'EOF'
+  cat >"$tmp/init.new" <<'INITEOF'
 #!/bin/sh
 mount -t proc none /proc
 mount -t sysfs none /sys
@@ -240,7 +262,7 @@ echo ""
 echo "KM emul init OK"
 echo ""
 exec /bin/sh
-EOF
+INITEOF
   chmod 755 "$tmp/init.new"
   debugfs -w "$work" <<EOF >/dev/null 2>&1 || true
 mkdir /dev
@@ -270,33 +292,31 @@ initrd_needs_fix() {
 }
 
 initrd_kind() {
-  # sve if < 10MiB (typical ~8MiB SVE busybox), else nosve
   local sz="$1"
   (( sz < 10000000 )) && echo sve || echo nosve
 }
 
 stage_emul_initrd_copy() {
-  # stage_emul_initrd_copy SRC_BASENAME DST_BASENAME
-  local src_name="$1" dst_name="$2"
+  local src_name="$1"
+  local dst_name="$2"
   local src="$DEPLOY/$src_name"
   [[ -e "$src" ]] || return 1
   if [[ "$KEEP_INITRD" == "1" && -f "$OUT/$dst_name" ]]; then
-    info "  keep existing $dst_name ($(du -h "$OUT/$dst_name" | awk '{print $1}'))"
+    info "  ~ $dst_name  KEPT  (--keep-initrd) ($(du -h "$OUT/$dst_name" | awk '{print $1}'))"
     return 0
   fi
-  cp -aL "$src" "$OUT/$dst_name"
+  copy_tracked "$src" "$dst_name"
   local sz kind
   sz="$(stat -c%s "$OUT/$dst_name")"
   kind="$(initrd_kind "$sz")"
-  info "  + $dst_name  ($(du -h "$OUT/$dst_name" | awk '{print $1}'), $kind busybox)"
+  info "      ($kind busybox)"
   return 0
 }
 
 maybe_fix_initrd() {
   local uboot="$1"
   local do_fix=0
-  if [[ "$FIX_INITRD" == "1" ]]; then
-    do_fix=1
+  if [[ "$FIX_INITRD" == "1" ]]; then do_fix=1
   elif [[ "$FIX_INITRD" == "-1" ]] && initrd_needs_fix "$uboot"; then
     do_fix=1
     warn "$(basename "$uboot"): /init lacks shebang — patching (rebuild km-emul-initrd to avoid)"
@@ -309,7 +329,6 @@ maybe_fix_initrd() {
 
 stage_emul_initrds() {
   local have_sve=0 have_nosve=0
-
   case "$INITRD_MODE" in
     sve)
       stage_emul_initrd_copy initrd_emul.uboot initrd_emul.uboot && have_sve=1 \
@@ -319,7 +338,7 @@ stage_emul_initrds() {
       if stage_emul_initrd_copy initrd_emul_nosve.uboot initrd_emul_nosve.uboot; then
         have_nosve=1
         cp -a "$OUT/initrd_emul_nosve.uboot" "$OUT/initrd_emul.uboot"
-        info "  + initrd_emul.uboot  (← initrd_emul_nosve.uboot for nosve boot)"
+        info "  + initrd_emul.uboot  UPDATED  (← initrd_emul_nosve.uboot for nosve boot)"
       elif stage_emul_initrd_copy initrd_emul.uboot initrd_emul.uboot; then
         have_nosve=1
         warn "initrd_emul_nosve.uboot missing — using large initrd_emul.uboot as nosve"
@@ -339,13 +358,27 @@ stage_emul_initrds() {
         || die "no initrd artifacts under $DEPLOY"
       ;;
   esac
-
   [[ -f "$OUT/initrd_emul.uboot" ]] && maybe_fix_initrd "$OUT/initrd_emul.uboot"
   [[ -f "$OUT/initrd_emul_nosve.uboot" ]] && maybe_fix_initrd "$OUT/initrd_emul_nosve.uboot"
   ln -sfn initrd_emul.uboot "$OUT/initrd135.uboot"
 }
 
-# --- stage by flavor ---
+stage_summary() {
+  local f
+  info ""
+  info "Stage summary ($OUT):"
+  for f in \
+    Image u-boot.itb u-boot-spl-dtb.bin \
+    socfpga_km.dtb socfpga_km_OSbV_sdmmc.dtb \
+    core-image-full-cmdline-km_osbv_sdmmc.wic \
+    initrd_emul.uboot initrd_emul_nosve.uboot \
+    bl31-sve.bin bl31-nosve.bin bl31.bin
+  do
+    [[ -e "$OUT/$f" ]] || continue
+    info "  $(printf '%-48s' "$f") $(stat -c '%y' "$OUT/$f" | cut -d. -f1)  md5=$(file_md5 "$OUT/$f" | cut -c1-12)…"
+  done
+}
+
 info "stage-artifact: $FLAVOR"
 info "  deploy = $DEPLOY"
 info "  out    = $OUT"
@@ -354,38 +387,39 @@ stage_spl
 stage_itb
 stage_bl31
 
-copy_one Image || die "Image not found under $DEPLOY"
+if ! copy_one Image; then
+  keep_or_die Image "Image not found under $DEPLOY (and none staged in $OUT)"
+fi
 
 case "$FLAVOR" in
   emul)
     stage_emul_initrds
-
-    # DTB often not in collect — keep existing or copy if present
-    if copy_one socfpga_km.dtb \
-      || copy_one socfpga_km_emul.dtb socfpga_km.dtb; then
+    if copy_one socfpga_km.dtb || copy_one socfpga_km_emul.dtb socfpga_km.dtb; then
       :
     elif [[ -f "$OUT/socfpga_km.dtb" ]]; then
-      info "  keep existing socfpga_km.dtb"
+      info "  ~ socfpga_km.dtb  KEPT  (not in deploy)"
     else
       warn "socfpga_km.dtb missing in deploy and out — boot scripts need it"
     fi
     ;;
   osbv)
-    dtb="$(find_first socfpga_km_OSbV_sdmmc.dtb)" \
-      || die "socfpga_km_OSbV_sdmmc.dtb not found under $DEPLOY"
-    cp -aL "$dtb" "$OUT/socfpga_km_OSbV_sdmmc.dtb"
-    info "  + socfpga_km_OSbV_sdmmc.dtb"
-
-    wic="$(find_first \
+    if dtb="$(find_first socfpga_km_OSbV_sdmmc.dtb)"; then
+      copy_tracked "$dtb" socfpga_km_OSbV_sdmmc.dtb
+    else
+      keep_or_die socfpga_km_OSbV_sdmmc.dtb \
+        "socfpga_km_OSbV_sdmmc.dtb not found under $DEPLOY (and none staged)"
+    fi
+    if wic="$(find_first \
       core-image-full-cmdline-km_osbv_sdmmc.wic \
-      core-image-full-cmdline-km_osbv_sdmmc.rootfs.wic)" \
-      || die "WIC not found under $DEPLOY"
-    cp -aL "$wic" "$OUT/core-image-full-cmdline-km_osbv_sdmmc.wic"
-    info "  + core-image-full-cmdline-km_osbv_sdmmc.wic  ($(du -h "$OUT/core-image-full-cmdline-km_osbv_sdmmc.wic" | awk '{print $1}'))"
+      core-image-full-cmdline-km_osbv_sdmmc.rootfs.wic)"; then
+      copy_tracked "$wic" core-image-full-cmdline-km_osbv_sdmmc.wic
+    else
+      keep_or_die core-image-full-cmdline-km_osbv_sdmmc.wic \
+        "WIC not found under $DEPLOY (and none staged)"
+    fi
     ;;
 esac
 
-# FIT / ATF sanity (do not repack)
 if [[ -f "$OUT/u-boot.itb" ]]; then
   if command -v dumpimage >/dev/null 2>&1; then
     info ""
@@ -404,6 +438,8 @@ if [[ -f "$OUT/u-boot.itb" ]]; then
     warn "could not match bl31-sve/nosve bytes inside FIT (external-data ITB is OK)"
   fi
 fi
+
+stage_summary
 
 info ""
 info "Staged → $OUT"

@@ -129,6 +129,14 @@ run
 
 load-file $kernel_image 0x82000000
 
+# KM HPS OSPI / Cadence xSPI: combophy aux MMIO is blocked while
+# ospi_combophy0.bank.combophy_bank is held in reset (Simics critical).
+# ospi_rst_state is already deasserted by U-Boot time; release combophy
+# hard-reset here so cadence-xspi PHY/aux reads succeed.
+echo "Deassert KM OSPI combophy hard/soft reset"
+@import os
+@exec(open(os.environ.get("SIMICS_PROJECT", conf.sim.project) + "/scripts/km_ospi_combophy_deassert.py").read())
+
 echo "Cluster PPU ON @ 0x08030000"
 $hps.apu.phys_mem.write address = 0x08030000 value = 0x8 size = 4
 

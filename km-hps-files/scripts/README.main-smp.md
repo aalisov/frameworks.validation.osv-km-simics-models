@@ -113,6 +113,7 @@ Or: `USE_HAMZA_ITB=1 ./scripts/stage-artifact.sh emul` (whole FIT copy — do no
 | `scripts/artifacts/publish-km-artifacts.sh` | publish to local/NFS share |
 | `run-emul-smp.sh` / `run-emul.sh` | emul ramdisk boot |
 | `run-osbv-smp.sh` / `run-osbv.sh` | osbv WIC boot |
+| `km_ospi_combophy_deassert.py` | OSBV: deassert `ospi_combophy0` before `booti` (Cadence xSPI aux/PHY) |
 | `run-km-generic-main.sh` | Hamza-style `km_generic.simics` |
 | `BASELINE.main-smp.manifest` | fingerprints |
 

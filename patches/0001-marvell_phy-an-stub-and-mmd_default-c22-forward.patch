@@ -1,0 +1,106 @@
+From: Andrey Lisov <andrey.lisov@altera.com>
+Subject: [PATCH] marvell_phy: AN stub 1G-full + mmd_default C22 forward
+
+KM OSBV Simics (board.phy1): stock model left AN unimplemented and
+mmd_default C22 as spec-viol zeros, which stalled Linux marvell/stmmac
+MDIO. Stub AN complete as 1000/full and forward non-copper-page C22
+to mmd_phy; quiet unimplemented MDIO45.
+
+Apply in applications.simulators.fpga.simics:
+  git apply patches/0001-marvell_phy-an-stub-and-mmd_default-c22-forward.patch
+Or keep km-hps modules/marvell_phy → symlink to that tree and rebuild:
+  cd ~/km-hps && make marvell_phy
+
+Upstream-Status: Pending [KM Simics bring-up]
+
+diff --git a/fpga-soc/modules/external/marvell/marvell_phy/Makefile b/fpga-soc/modules/external/marvell/marvell_phy/Makefile
+index 41444a7491..85f6d8ccda 100644
+--- a/fpga-soc/modules/external/marvell/marvell_phy/Makefile
++++ b/fpga-soc/modules/external/marvell/marvell_phy/Makefile
+@@ -9,7 +9,10 @@ SRC_FILES = marvell_phy.dml
+ 
+ PYTHON_FILES = module_load.py
+ 
+-EXTRA_MODULE_VPATH += common/code/platform-common/base_copy/dml-lib
++# When building from ~/km-hps (module under modules/marvell_phy), point at
++# the fpga.simics tree's shared DML lib (utility.dml etc.).
++MARVELL_REPO_DML_LIB ?= $(HOME)/simics_git/applications.simulators.fpga.simics/fpga-soc/modules/common/isim/common/code/platform-common/base_copy/dml-lib
++EXTRA_MODULE_VPATH += $(MARVELL_REPO_DML_LIB)
+ 
+ SIMICS_API := latest
+ THREAD_SAFE := yes
+diff --git a/fpga-soc/modules/external/marvell/marvell_phy/marvell_phy.dml b/fpga-soc/modules/external/marvell/marvell_phy/marvell_phy.dml
+index a3c4d95ca5..9040c082be 100644
+--- a/fpga-soc/modules/external/marvell/marvell_phy/marvell_phy.dml
++++ b/fpga-soc/modules/external/marvell/marvell_phy/marvell_phy.dml
+@@ -964,8 +964,18 @@ bank mmd_phy {
+         method write_register(uint64 value, uint64 enabled_bytes, void *aux) {
+             default(value, enabled_bytes, aux);
+             if (an_restart == true) {
++                // Minimal AN stub: model had no AN; complete as 1G full so
++                // Linux stmmac/marvell driver can leave polling and use RGMII.
+                 restart_an.val = 0;
+-                log unimpl, 2: "Auto-negotiation is not implemented";
++                an_restart = false;
++                an_enable.val = 1;
++                ss_msb.val = 1;
++                ss_lsb.val = 0;
++                duplex_mode.val = 1;
++                new_speed = true;
++                log info, 2:
++                    "AN stub: forcing 1000 MBit full duplex (was unimplemented)";
++                link_up();
+             }
+             if (new_speed == true)
+                 speed_duplex();
+@@ -1114,33 +1124,32 @@ bank mmd_default {
+     param mappable = false;
+     param register_size = 2;
+ 
++    // When phy_configuration.page_number != copper (page 0), MII/MDIO is
++    // routed here. This bank had no C22 map → spec-viol on regs 0/17/etc and
++    // Linux marvell driver hangs/misbehaves. Forward Clause-22 MII to mmd_phy
++    // (copper register file) as a Simics workaround.
++
+     method mdio45_read(int mmd, int reg) -> (uint64) default {
+-        local uint64 value;
+-        log spec_viol, 4:
+-          "mmd_default: reading from register %d in non-existing MMD %d",
+-          reg, mmd;
+-        value = 0x0;
+-        return value;
++        // Unimplemented MMDs (e.g. PCS MMD 2): quiet zero, not spec-viol spam.
++        log info, 4:
++          "mmd_default: MDIO45 read mmd %d reg %d -> 0 (unimplemented MMD)",
++          mmd, reg;
++        return 0;
+     }
+ 
+     method mdio45_write(int mmd, int reg, uint64 value) default {
+-        log spec_viol, 4:
+-          "mmd_default: writing 0x%04x to register %d in non-existing MMD %d",
+-          value, reg, mmd;
++        log info, 4:
++          "mmd_default: MDIO45 write mmd %d reg %d value 0x%04x ignored",
++          mmd, reg, value;
+     }
+ 
+     method read_mii_register(int reg) -> (uint64) {
+-        local uint64 value;
+-        log spec_viol, 4:
+-          "mii_default: reading from register %d in non-existing",
+-          reg;
+-        value = 0x0;
+-        return value;
++        log info, 4: "mii_default: forward read reg %d -> mmd_phy", reg;
++        return mmd_phy.read_mii_register(reg);
+     }
+ 
+     method write_mii_register(int reg, uint64 value) {
+-        log spec_viol, 4:
+-          "mii_default: writing 0x%04x to register %d in non-existing",
+-          value, reg;
++        log info, 4: "mii_default: forward write reg %d -> mmd_phy", reg;
++        mmd_phy.write_mii_register(reg, value);
+     }
+ }

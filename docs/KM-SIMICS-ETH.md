@@ -48,6 +48,24 @@ Yocto details / patches: `osv-yocto` →
 `recipes-kernel/linux/files/README.KM-ETH.md` and
 `recipes-content/km-pve-hps-content/docs/KM-SIMICS-ETH.md`.
 
+## Marvell PHY model (`board.phy1`)
+
+Stock `marvell_phy` left **auto-neg unimplemented** and **`mmd_default` C22**
+as spec-viol zeros (Linux marvell/stmmac MDIO stalls). Local fix (still in
+working tree of `applications.simulators.fpga.simics`, not the Yocto push):
+
+| Change | Effect |
+|--------|--------|
+| AN stub on `an_restart` | Complete as **1000/full**, `link_up()` |
+| `mmd_default` C22 → `mmd_phy` | Forward page≠copper MII instead of zero/spec-viol |
+| Quiet MDIO45 stubs | Less log spam on unimplemented MMDs |
+
+- Live tree: `~/simics_git/applications.simulators.fpga.simics/.../marvell_phy/`
+- `~/km-hps/modules/marvell_phy` → symlink to that tree; rebuild with `make marvell_phy`
+- Patch export: `patches/0001-marvell_phy-an-stub-and-mmd_default-c22-forward.patch`
+
+Durable MAC/DT fixes alone are not enough if MDIO/AN still hangs the PHY path.
+
 ## Avoid
 
 - Guest: `ethtool`, `ip link set eth0 down`, casual `ip route add` (wedge history)

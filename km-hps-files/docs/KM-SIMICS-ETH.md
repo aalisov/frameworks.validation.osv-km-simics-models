@@ -12,3 +12,8 @@ source ./scripts/host/km-simics-ssh-publish.sh --instance 0 --auto --firewall
 # remote: ssh -p 4022 root@$HOST_BIND_IP
 ./scripts/host/km-simics-instances.sh status
 ```
+
+Marvell PHY model AN/`mmd_default` fix: see full `docs/KM-SIMICS-ETH.md` and
+`patches/0001-marvell_phy-an-stub-and-mmd_default-c22-forward.patch` (lives in
+`applications.simulators.fpga.simics` working tree; symlink under
+`~/km-hps/modules/marvell_phy`).

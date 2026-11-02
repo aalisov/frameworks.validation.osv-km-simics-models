@@ -1,0 +1,216 @@
+/*
+ * VSIP memory traffic checker (mem_sink) — functional Simics model.
+ *
+ * Register map matches supersmasher vsipmemsink.h / KM DT overlay:
+ *   control @ +0x00000, refdata @ +0x10000, errors @ +0x20000
+ * H2F target window (vsip-memsink-tgt) is a separate mapped bank that
+ * compares CPU/DMA traffic against the reference array when CONF_RUN
+ * and CONF_ERROR are set (see thr-simple-cpu.c).
+ */
+
+dml 1.4;
+
+device vsip_memsink;
+param classname = "vsip_memsink";
+param desc = "VSIP memory traffic checker (mem_sink)";
+param documentation =
+    "Functional model of the VSIP mem_sink RTL block: AXI4-Lite control, "
+    + "reference data bank, error log, and H2F target compare window.";
+
+import "utility.dml";
+
+constant REG_DW = 4;
+constant REF_DWS = 4096;          /* mem_sink_pkg REF_DWS */
+constant ERR_ENTRIES = 256;       /* vsipmemsink.h VSIP_MEMSINK_ERROR_ARRAY_ENTRIES */
+constant ERR_REC_DWS = 8;         /* 32-byte memsink_error_t */
+constant ERR_TOTAL = ERR_ENTRIES * ERR_REC_DWS;
+constant TGT_DWS = 0x4000 / REG_DW; /* DT tgt window 16 KiB */
+
+constant CONF_RUN   = 1 << 0;
+constant CONF_ERROR = 1 << 1;
+
+constant STAT_ERRCNT_MASK = 0x1ff;
+constant STAT_OVERFLOW    = 1 << 8;
+constant STAT_CONF_RUN    = 1 << 9;
+
+saved bool running;
+saved bool overflow;
+saved uint32 error_count;
+saved uint32 range_l;
+saved uint32 write_timeout;
+saved uint32 dwcount;
+saved uint32 config_reg;
+saved uint32 tgt_base;   /* absolute PA of target window (for error.addr) */
+
+saved uint32 ref_storage[REF_DWS];
+saved uint32 tgt_storage[TGT_DWS];
+saved uint32 err_storage[ERR_TOTAL];
+
+method clear_errors() {
+    local int i;
+    error_count = 0;
+    overflow = false;
+    for (i = 0; i < ERR_TOTAL; i++)
+        err_storage[i] = 0;
+}
+
+method status_value() -> (uint32) {
+    local uint32 s = error_count & STAT_ERRCNT_MASK;
+    if (overflow)
+        s = s | STAT_OVERFLOW;
+    if (running)
+        s = s | STAT_CONF_RUN;
+    return s;
+}
+
+method log_write_error(uint32 dw_idx, uint32 got) {
+    local int slot;
+    local uint64 abs_addr;
+
+    if (error_count >= ERR_ENTRIES) {
+        overflow = true;
+        return;
+    }
+    slot = cast(error_count, int) * ERR_REC_DWS;
+    abs_addr = cast(tgt_base, uint64) + cast(dw_idx, uint64) * REG_DW;
+
+    err_storage[slot + 0] = got;
+    err_storage[slot + 1] = 0;
+    err_storage[slot + 2] = 0;
+    err_storage[slot + 3] = 0;
+    err_storage[slot + 4] = cast(abs_addr & 0xffffffff, uint32);
+    err_storage[slot + 5] = cast(abs_addr >> 32, uint32);
+    err_storage[slot + 6] = 0;
+    err_storage[slot + 7] = 0;
+    error_count = error_count + 1;
+    log info, 3: "VSIP memsink mismatch dw=%d got=0x%x expect=0x%x",
+        dw_idx, got, ref_storage[dw_idx];
+}
+
+method check_write(int dw_idx, uint32 val) {
+    if (!running)
+        return;
+    if ((config_reg & CONF_ERROR) == 0)
+        return;
+    if (dw_idx < 0 || cast(dw_idx, uint32) >= dwcount)
+        return;
+    if (dw_idx >= REF_DWS)
+        return;
+    if (ref_storage[dw_idx] != val)
+        log_write_error(cast(dw_idx, uint32), val);
+}
+
+method on_config_write(uint32 val) {
+    local bool start = (val & CONF_RUN) != 0;
+    local bool was_running = running;
+    config_reg = val;
+    if (start && !was_running) {
+        clear_errors();
+        running = true;
+        log info, 2: "VSIP memsink RUN (err_chk=%d range_l=0x%x dwcount=%d)",
+            (val & CONF_ERROR) != 0 ? 1 : 0, range_l, dwcount;
+    } else if (!start && was_running) {
+        running = false;
+        log info, 2: "VSIP memsink STOP (errors=%d)", error_count;
+    }
+}
+
+bank control {
+    param register_size = REG_DW;
+    param byte_order = "little-endian";
+
+    register status @ 0x00 is (read) "Error status / run flag" {
+        method get() -> (uint64) { return status_value(); }
+    }
+    register reserved0 @ 0x04 is (read, write) {
+        method write(uint64 val) { default(val); }
+    }
+    register range_l_r @ 0x08 is (read, write) "Compare window base" {
+        method write(uint64 val) { range_l = val; default(val); }
+        method get() -> (uint64) { return range_l; }
+    }
+    register write_timeout_r @ 0x0c is (read, write) {
+        method write(uint64 val) { write_timeout = val; default(val); }
+        method get() -> (uint64) { return write_timeout; }
+    }
+    register dwcount_r @ 0x10 is (read, write) "Reference dword count" {
+        method write(uint64 val) {
+            if (val > REF_DWS)
+                dwcount = REF_DWS;
+            else
+                dwcount = val;
+            default(dwcount);
+        }
+        method get() -> (uint64) { return dwcount; }
+    }
+    register unused0 @ 0x14 is (read, write) { method write(uint64 val) { default(val); } }
+    register unused1 @ 0x18 is (read, write) { method write(uint64 val) { default(val); } }
+    register unused2 @ 0x1c is (read, write) { method write(uint64 val) { default(val); } }
+    register unused3 @ 0x20 is (read, write) { method write(uint64 val) { default(val); } }
+    register unused4 @ 0x24 is (read, write) { method write(uint64 val) { default(val); } }
+    register config @ 0x28 is (read, write) "Run / error-check control" {
+        method write(uint64 val) {
+            on_config_write(val);
+            default(val);
+        }
+        method get() -> (uint64) { return config_reg; }
+    }
+}
+
+bank refdata {
+    param register_size = REG_DW;
+    param byte_order = "little-endian";
+
+    register ref_dw[i < REF_DWS] @ (i * REG_DW) is (read, write) {
+        method write(uint64 val) {
+            ref_storage[i] = val;
+            default(val);
+        }
+        method get() -> (uint64) { return ref_storage[i]; }
+    }
+}
+
+bank errors {
+    param register_size = REG_DW;
+    param byte_order = "little-endian";
+
+    register err_dw[i < ERR_TOTAL] @ (i * REG_DW) is (read, write) {
+        method write(uint64 val) {
+            err_storage[i] = val;
+            default(val);
+        }
+        method get() -> (uint64) { return err_storage[i]; }
+    }
+}
+
+/* H2F / soc2fpga target window — mapped at vsip-memsink-tgt (e.g. 0xC0000000). */
+bank target {
+    param register_size = REG_DW;
+    param byte_order = "little-endian";
+
+    register tgt_dw[i < TGT_DWS] @ (i * REG_DW) is (read, write) {
+        method write(uint64 val) {
+            check_write(i, val);
+            tgt_storage[i] = val;
+            default(val);
+        }
+        method get() -> (uint64) {
+            /* RTL returns reference data for in-range reads while checking. */
+            if (running && (config_reg & CONF_ERROR) != 0 && i < REF_DWS)
+                return ref_storage[i];
+            return tgt_storage[i];
+        }
+    }
+}
+
+method init() {
+    running = false;
+    overflow = false;
+    error_count = 0;
+    range_l = 0;
+    write_timeout = 0;
+    dwcount = REF_DWS;
+    config_reg = 0;
+    tgt_base = 0xC0000000;
+    clear_errors();
+}

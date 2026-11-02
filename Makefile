@@ -2,10 +2,11 @@
 #
 #   cd ~/km-hps && source ./set_simics_env_main.sh
 #   ln -sf /path/to/km-simics-device-models/vsip-memsrc modules/vsip-memsrc
+#   ln -sf /path/to/km-simics-device-models/vsip-memsink modules/vsip-memsink
 #   ln -sf /path/to/km-simics-device-models/p3t1755 modules/p3t1755
-#   make -C modules/vsip-memsrc && make -C modules/p3t1755
+#   make -C modules/vsip-memsrc && make -C modules/vsip-memsink && make -C modules/p3t1755
 
-MODULES := vsip-memsrc p3t1755
+MODULES := vsip-memsrc vsip-memsink p3t1755
 
 .PHONY: all clean $(MODULES)
 

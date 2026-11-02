@@ -1,0 +1,122 @@
+--- a/km_universal_board_comp.py
++++ b/km_universal_board_comp.py
+@@ -108,6 +108,21 @@
+     ):
+         """Base address for VSIP mem_source MMIO."""
+ 
++    class create_vsip_memsink(
++        SimpleConfigAttribute(True, "b", simics.Sim_Attr_Optional)
++    ):
++        """Instantiate VSIP mem_sink model (ctl@0xF9040000, tgt@0xC0000000)."""
++
++    class vsip_memsink_ctl_base(
++        SimpleConfigAttribute(0xF9040000, "i", simics.Sim_Attr_Optional)
++    ):
++        """Base address for VSIP mem_sink control MMIO."""
++
++    class vsip_memsink_tgt_base(
++        SimpleConfigAttribute(0xC0000000, "i", simics.Sim_Attr_Optional)
++    ):
++        """Base address for VSIP mem_sink H2F target window."""
++
+     ########################################################################
+     # Component methods
+     ######################################################################
+@@ -391,6 +406,16 @@
+                 [["base_addr", self.vsip_memsrc_base.val]],
+             )
+ 
++        if self.create_vsip_memsink.val:
++            self.add_component(
++                "vsip_memsink_0",
++                "vsip_memsink_comp",
++                [
++                    ["base_addr", self.vsip_memsink_ctl_base.val],
++                    ["target_addr", self.vsip_memsink_tgt_base.val],
++                ],
++            )
++
+         # Minimal P3T1755-compatible temp sensor (I3C0)
+         self.add_component(
+             "p3t1755_0",
+@@ -616,35 +641,59 @@
+ 
+     class component(StandardComponent.component):
+         def post_instantiate(self):
+-            if not self._up.create_vsip_memsrc.val:
+-                return
+             phys_mem = self._up.get_slot("fpga.hps.apu.phys_mem")
+-            vsip_mmio = self._up.get_slot("vsip_memsrc_0.mmio")
+-            base = self._up.vsip_memsrc_base.val
+-            size = 0x40000
+             new_map = list(phys_mem.map)
+-            new_map.append([base, vsip_mmio, 0, 0, size])
+-            phys_mem.map = new_map
+-            simics.SIM_log_info(
+-                3,
+-                self._up.obj,
+-                0,
+-                f"Mapped VSIP memsrc MMIO at 0x{base:x} (size 0x{size:x})",
+-            )
+-            # F2 AXI master must see the same PA map as the CPU (DRAM carveout
+-            # at 0xf0000000+, etc.). A private stub RAM only covers 0..size.
+-            try:
+-                self._up.get_slot("vsip_memsrc_0.dev").f2_mem = phys_mem
++
++            if self._up.create_vsip_memsrc.val:
++                vsip_mmio = self._up.get_slot("vsip_memsrc_0.mmio")
++                base = self._up.vsip_memsrc_base.val
++                size = 0x40000
++                new_map.append([base, vsip_mmio, 0, 0, size])
+                 simics.SIM_log_info(
+                     3,
+                     self._up.obj,
+                     0,
+-                    "Routed VSIP memsrc F2 master to hps.apu.phys_mem",
++                    f"Mapped VSIP memsrc MMIO at 0x{base:x} (size 0x{size:x})",
+                 )
+-            except Exception as exc:  # pylint: disable=broad-except
++                # F2 AXI master must see the same PA map as the CPU (DRAM carveout
++                # at 0xf0000000+, etc.). A private stub RAM only covers 0..size.
++                try:
++                    self._up.get_slot("vsip_memsrc_0.dev").f2_mem = phys_mem
++                    simics.SIM_log_info(
++                        3,
++                        self._up.obj,
++                        0,
++                        "Routed VSIP memsrc F2 master to hps.apu.phys_mem",
++                    )
++                except Exception as exc:  # pylint: disable=broad-except
++                    simics.SIM_log_info(
++                        1,
++                        self._up.obj,
++                        0,
++                        f"VSIP F2→phys_mem wire failed: {exc}",
++                    )
++
++            if self._up.create_vsip_memsink.val:
++                sink_mmio = self._up.get_slot("vsip_memsink_0.mmio")
++                sink_tgt = self._up.get_slot("vsip_memsink_0.tgt_space")
++                ctl = self._up.vsip_memsink_ctl_base.val
++                tgt = self._up.vsip_memsink_tgt_base.val
++                new_map.append([ctl, sink_mmio, 0, 0, 0x40000])
++                new_map.append([tgt, sink_tgt, 0, 0, 0x4000])
++                try:
++                    self._up.get_slot("vsip_memsink_0.dev").tgt_base = tgt
++                except Exception as exc:  # pylint: disable=broad-except
++                    simics.SIM_log_info(
++                        1,
++                        self._up.obj,
++                        0,
++                        f"VSIP memsink tgt_base set failed: {exc}",
++                    )
+                 simics.SIM_log_info(
+-                    1,
++                    3,
+                     self._up.obj,
+                     0,
+-                    f"VSIP F2→phys_mem wire failed: {exc}",
++                    f"Mapped VSIP memsink ctl@0x{ctl:x} tgt@0x{tgt:x}",
+                 )
++
++            phys_mem.map = new_map

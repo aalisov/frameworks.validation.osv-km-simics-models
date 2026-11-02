@@ -60,6 +60,9 @@ working tree of `applications.simulators.fpga.simics`, not the Yocto push):
 | `mmd_default` C22 → `mmd_phy` | Forward page≠copper MII instead of zero/spec-viol |
 | Quiet MDIO45 stubs | Less log spam on unimplemented MMDs |
 
+Submit **only** `marvell_phy.dml` upstream. Any Makefile `EXTRA_MODULE_VPATH`
+override is local off-tree (`~/km-hps`) build glue — do not include in the PR.
+
 - Live tree: `~/simics_git/applications.simulators.fpga.simics/.../marvell_phy/`
 - `~/km-hps/modules/marvell_phy` → symlink to that tree; rebuild with `make marvell_phy`
 - Patch export: `patches/0001-marvell_phy-an-stub-and-mmd_default-c22-forward.patch`

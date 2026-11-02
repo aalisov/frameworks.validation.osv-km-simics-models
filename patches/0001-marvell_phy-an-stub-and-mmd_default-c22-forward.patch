@@ -6,31 +6,12 @@ mmd_default C22 as spec-viol zeros, which stalled Linux marvell/stmmac
 MDIO. Stub AN complete as 1000/full and forward non-copper-page C22
 to mmd_phy; quiet unimplemented MDIO45.
 
-Apply in applications.simulators.fpga.simics:
-  git apply patches/0001-marvell_phy-an-stub-and-mmd_default-c22-forward.patch
-Or keep km-hps modules/marvell_phy → symlink to that tree and rebuild:
-  cd ~/km-hps && make marvell_phy
+Off-tree Makefile VPATH tweaks for ~/km-hps are intentionally omitted.
 
 Upstream-Status: Pending [KM Simics bring-up]
 
-diff --git a/fpga-soc/modules/external/marvell/marvell_phy/Makefile b/fpga-soc/modules/external/marvell/marvell_phy/Makefile
-index 41444a7491..85f6d8ccda 100644
---- a/fpga-soc/modules/external/marvell/marvell_phy/Makefile
-+++ b/fpga-soc/modules/external/marvell/marvell_phy/Makefile
-@@ -9,7 +9,10 @@ SRC_FILES = marvell_phy.dml
- 
- PYTHON_FILES = module_load.py
- 
--EXTRA_MODULE_VPATH += common/code/platform-common/base_copy/dml-lib
-+# When building from ~/km-hps (module under modules/marvell_phy), point at
-+# the fpga.simics tree's shared DML lib (utility.dml etc.).
-+MARVELL_REPO_DML_LIB ?= $(HOME)/simics_git/applications.simulators.fpga.simics/fpga-soc/modules/common/isim/common/code/platform-common/base_copy/dml-lib
-+EXTRA_MODULE_VPATH += $(MARVELL_REPO_DML_LIB)
- 
- SIMICS_API := latest
- THREAD_SAFE := yes
 diff --git a/fpga-soc/modules/external/marvell/marvell_phy/marvell_phy.dml b/fpga-soc/modules/external/marvell/marvell_phy/marvell_phy.dml
-index a3c4d95ca5..9040c082be 100644
+index a3c4d95ca5..41856af4d7 100644
 --- a/fpga-soc/modules/external/marvell/marvell_phy/marvell_phy.dml
 +++ b/fpga-soc/modules/external/marvell/marvell_phy/marvell_phy.dml
 @@ -964,8 +964,18 @@ bank mmd_phy {
@@ -58,7 +39,7 @@ index a3c4d95ca5..9040c082be 100644
      param register_size = 2;
  
 +    // When phy_configuration.page_number != copper (page 0), MII/MDIO is
-+    // routed here. This bank had no C22 map → spec-viol on regs 0/17/etc and
++    // routed here. This bank had no C22 map -> spec-viol on regs 0/17/etc and
 +    // Linux marvell driver hangs/misbehaves. Forward Clause-22 MII to mmd_phy
 +    // (copper register file) as a Simics workaround.
 +

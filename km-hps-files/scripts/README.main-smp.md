@@ -27,6 +27,24 @@ source ./set_simics_env_main.sh
 ./scripts/run-osbv-smp.sh
 ./scripts/run-emul-smp.sh
 telnet 127.0.0.1 9123
+
+# USB3.1 gadget experiment (no host-port mass-storage; xDCI mapped):
+./scripts/run-osbv-smp-usb31-device.sh
+# guest: osvloaddtoverlay km-usb31-gadget && km-usb31-gadget-check.sh
+# (USB2 DWC2 overlay remains km-usb-gadget — different name)
+
+# Eth + SSH via host NIC (NAPT port-in — docs/KM-SIMICS-ETH.md):
+source ./scripts/host/km-simics-ssh-publish.sh --auto --firewall
+./scripts/run-osbv-smp-usb31-device.sh create_hps_eth0_network=TRUE
+# guest: setup-simics-eth.sh
+# remote: ssh -p 4022 root@$HOST_LAN_HINT
+# status: ./scripts/host/km-simics-instances.sh status
+# one-shot: KM_SIMICS_PUBLISH_SSH=1 KM_SIMICS_SSH_FIREWALL=1 ./scripts/run-osbv-smp-usb31-device.sh
+
+# Variant S — same device boot + USBIP bridge hook (needs model; see docs/KM-SIMICS-USBIP.md):
+./scripts/run-osbv-smp-usb31-usbip.sh
+# guest: overlay + km-usb-gadget-setup.sh (no usbipd)
+# host:  ./scripts/host/km-usbip-attach.sh   # after bridge listens on :3240
 ```
 
 
@@ -113,8 +131,13 @@ Or: `USE_HAMZA_ITB=1 ./scripts/stage-artifact.sh emul` (whole FIT copy — do no
 | `scripts/artifacts/publish-km-artifacts.sh` | publish to local/NFS share |
 | `run-emul-smp.sh` / `run-emul.sh` | emul ramdisk boot |
 | `run-osbv-smp.sh` / `run-osbv.sh` | osbv WIC boot |
+| `run-osbv-smp-usb31-device.sh` | osbv + USB31 device; eth NAPT when `create_hps_eth0_network=TRUE` |
+| `host/km-simics-ssh-publish.sh` | bind SSH port-in to host NIC (`--auto` / `--iface`) |
+| `host/km-simics-instances.sh` | list live instances / SSH+telnet ports |
+| `km_simics_eth_host_fwd.py` | Simics NAPT + `connect-real-network-port-in` for SSH |
 | `km_ospi_combophy_deassert.py` | OSBV: deassert `ospi_combophy0` before `booti` (Cadence xSPI aux/PHY) |
 | `run-km-generic-main.sh` | Hamza-style `km_generic.simics` |
 | `BASELINE.main-smp.manifest` | fingerprints |
+| `docs/KM-SIMICS-ETH.md` | guest eth + host SSH publish |
 
 Do **not** `mkimage`/`/incbin/`-repack `u-boot.itb`.

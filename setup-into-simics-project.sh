@@ -20,7 +20,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MODULES=(vsip-memsrc p3t1755)
+MODULES=(vsip-memsrc vsip-memsink p3t1755)
 HPS_FILES="$REPO_ROOT/km-hps-files"
 
 PROJECT="${SIMICS_PROJECT:-$HOME/km-hps}"
@@ -105,7 +105,11 @@ install_module() {
       fi
       die "$dst already exists (use --force to replace)"
     fi
-    local bak="${dst}.bak.$(date +%Y%m%d%H%M%S)"
+    # Never leave *.bak.* under modules/ — Simics treats every subdir as a
+    # module and bak copies redefine the same DML/Python classes.
+    local bak_root="$PROJECT/.module-backups"
+    mkdir -p "$bak_root"
+    local bak="$bak_root/${name}.bak.$(date +%Y%m%d%H%M%S)"
     info "Backing up $dst → $bak"
     mv "$dst" "$bak"
   fi
@@ -167,6 +171,28 @@ install_scripts() {
     cp -a "$PROJECT/scripts/README.main-smp.md" "$PROJECT/README.KM-SIMICS.md"
   fi
 
+  # docs/ (ETH, USBIP, …) — prefer km-hps-files/docs, else repo docs/
+  local docs_src=""
+  if [[ -d "$HPS_FILES/docs" ]]; then
+    docs_src="$HPS_FILES/docs"
+  elif [[ -d "$REPO_ROOT/docs" ]]; then
+    docs_src="$REPO_ROOT/docs"
+  fi
+  if [[ -n "$docs_src" ]]; then
+    mkdir -p "$PROJECT/docs"
+    if command -v rsync >/dev/null 2>&1; then
+      rsync -a "$docs_src/" "$PROJECT/docs/"
+    else
+      cp -a "$docs_src/." "$PROJECT/docs/"
+    fi
+    # Also refresh from repo docs/ when both exist (repo may be newer)
+    if [[ -d "$REPO_ROOT/docs" && "$docs_src" != "$REPO_ROOT/docs" ]]; then
+      rsync -a "$REPO_ROOT/docs/" "$PROJECT/docs/" 2>/dev/null \
+        || cp -a "$REPO_ROOT/docs/." "$PROJECT/docs/"
+    fi
+    info "  + docs/ (ETH/USBIP/…)"
+  fi
+
   # targets/km (agilex72-universal-fixed.simics + SMP fixup wrapper)
   if [[ -d "$HPS_FILES/targets" ]]; then
     mkdir -p "$PROJECT/targets"
@@ -200,6 +226,7 @@ install_board_with_vsip() {
   local board_dir="$PROJECT/modules/km-universal-board-comp"
   local board_py="$board_dir/km_universal_board_comp.py"
   local patch="$REPO_ROOT/patches/0001-km-universal-board-comp-VSIP-P3T1755.patch"
+  local patch2="$REPO_ROOT/patches/0002-km-universal-board-comp-VSIP-memsink.patch"
   local src=""
 
   [[ -f "$patch" ]] || die "missing board patch: $patch"
@@ -245,8 +272,10 @@ install_board_with_vsip() {
     info "OK  modules/km/common already present"
   fi
 
-  if [[ -f "$board_py" && $FORCE -eq 0 ]] && grep -q 'create_vsip_memsrc' "$board_py" 2>/dev/null; then
-    info "OK  board already has create_vsip_memsrc"
+  if [[ -f "$board_py" && $FORCE -eq 0 ]] \
+       && grep -q 'create_vsip_memsrc' "$board_py" 2>/dev/null \
+       && grep -q 'create_vsip_memsink' "$board_py" 2>/dev/null; then
+    info "OK  board already has create_vsip_memsrc + create_vsip_memsink"
     return 0
   fi
   if [[ -f "$board_py" && $FORCE -eq 1 ]]; then
@@ -258,12 +287,23 @@ install_board_with_vsip() {
   [[ -f "$board_dir/module_load.py" ]] || cp -a "$src/module_load.py" "$board_dir/module_load.py"
 
   if grep -q 'create_vsip_memsrc' "$board_py" 2>/dev/null; then
-    info "OK  board already patched"
+    info "OK  board already has memsrc patch"
   else
     info "Applying $patch"
-    (cd "$board_dir" && patch -p1 < "$patch") || die "board patch failed"
+    (cd "$board_dir" && patch -p1 < "$patch") || die "board patch 0001 failed"
   fi
   grep -q 'create_vsip_memsrc' "$board_py" || die "create_vsip_memsrc missing after patch"
+
+  if grep -q 'create_vsip_memsink' "$board_py" 2>/dev/null; then
+    info "OK  board already has memsink patch"
+  elif [[ -f "$patch2" ]]; then
+    info "Applying $patch2"
+    if (cd "$board_dir" && patch -p1 < "$patch2"); then
+      info "Board: VSIP memsink hooks present"
+    else
+      info "WARNING: patch 0002 failed — wire manually via simmod.vsip_memsink.board_hooks"
+    fi
+  fi
   info "Board: VSIP+P3T1755 hooks present"
 }
 
@@ -293,7 +333,7 @@ if [[ $DO_BUILD -eq 1 && $DO_MODELS -eq 1 ]]; then
     # Board patch needs env so SIMICS_FPGA_ROOT is set
     install_board_with_vsip
     if [[ -f GNUmakefile || -f Makefile ]]; then
-      make ENVCHECK=disable vsip-memsrc p3t1755 km-universal-board-comp 2>/dev/null \
+      make ENVCHECK=disable vsip-memsrc vsip-memsink p3t1755 km-universal-board-comp 2>/dev/null \
         || make ENVCHECK=disable \
         || make
     else
@@ -320,7 +360,7 @@ fi
 
 info ""
 info "Done."
-info "  Models:  vsip_memsrc, p3t1755"
+info "  Models:  vsip_memsrc, vsip_memsink, p3t1755"
 info "  Scripts: $PROJECT/scripts/  (stage-artifact, run-*-smp, fetch-km-artifacts)"
 info "  Env:     source $PROJECT/set_simics_env_main.sh"
 info ""

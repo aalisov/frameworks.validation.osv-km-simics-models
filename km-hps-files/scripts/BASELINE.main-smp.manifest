@@ -13,6 +13,7 @@ cluster_ppu     phys_mem.write 0x08030000 = 0x8 before booti
 [scripts]
 run-emul-smp.sh           boot-to-linux-smp.simics
 run-osbv-smp.sh           boot-to-osbv-smp-linux.simics
+run-osbv-smp-usb-boot.sh  boot-to-osbv-smp-usb-boot.simics (same WIC → usb3_disk)
 run-km-generic-main.sh    km_generic.simics (full SMP path)
 stage-artifact.sh         copy collect → images/{emul,osbv}
 set_simics_env_main.sh    project root

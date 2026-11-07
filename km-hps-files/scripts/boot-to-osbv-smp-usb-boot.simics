@@ -1,0 +1,207 @@
+# =============================================================================
+# OSBV on intel-fpga-main: boot Linux from USB mass-storage (same .wic as SD)
+# =============================================================================
+#
+# Loads core-image-full-cmdline-km_osbv_sdmmc.wic onto usb3_disk (SuperSpeed),
+# brings up U-Boot from RAM (SPL/ITB), then runs `boot_usb` (Image + DTB from
+# USB FAT, root on USB rootfs) — unless stop_at_uboot / uboot_menu is set.
+#
+#   ./scripts/run-osbv-smp-usb-boot.sh
+#   ./scripts/run-osbv-smp-usb-boot.sh stop_at_uboot=TRUE
+#   ./scripts/run-osbv-smp-usb-boot.sh uboot_menu=TRUE
+#   telnet 127.0.0.1 9123
+# =============================================================================
+
+add-directory "%script%"
+$script_dir = (resolve-file "%script%")
+$project_dir = $script_dir + "/.."
+
+if not defined artifacts_dir {
+    if defined payload_dir {
+        $artifacts_dir = $payload_dir
+    } else {
+        $artifacts_dir = $project_dir + "/images/osbv"
+    }
+}
+add-directory $artifacts_dir
+echo "artifacts_dir = %s" % $artifacts_dir
+echo "mode: main SMP-on + SVE-on — USB boot (same WIC as SDMMC)"
+
+if not defined spl_name    { $spl_name    = "u-boot-spl-dtb.bin" }
+if not defined ssbl_name   { $ssbl_name   = "u-boot.itb" }
+if not defined bl31_name   { $bl31_name   = "bl31-sve.bin" }
+if not defined kernel_name { $kernel_name = "Image" }
+if not defined dtb_name    { $dtb_name    = "socfpga_km_OSbV_sdmmc.dtb" }
+if not defined wic_name {
+    $wic_name = "core-image-full-cmdline-km_osbv_sdmmc.wic"
+}
+
+$spl_bin = $artifacts_dir + "/" + $spl_name
+$ssbl_image = $artifacts_dir + "/" + $ssbl_name
+$bl31_bin = $artifacts_dir + "/" + $bl31_name
+$kernel_image = $artifacts_dir + "/" + $kernel_name
+$dtb_image = $artifacts_dir + "/" + $dtb_name
+$wic_image = $artifacts_dir + "/" + $wic_name
+
+# Linux root when WIC is on SuperSpeed stick; override if enumeration differs:
+#   ./scripts/run-osbv-smp-usb-boot.sh usb_linux_root=/dev/sdb2
+if not defined usb_linux_root { $usb_linux_root = "/dev/sda2" }
+if not defined usb_uboot_dev { $usb_uboot_dev = "0" }
+
+if not defined bootargs {
+    $bootargs = "console=ttyS0,115200n8 root=" + $usb_linux_root + " rw rootwait maxcpus=4 mem=968M"
+}
+
+if not defined sdm_hmod_fw_image_filename {
+    $sdm_hmod_fw_image_filename = ""
+}
+if $sdm_hmod_fw_image_filename != "" {
+    if not (lookup-file $sdm_hmod_fw_image_filename -query) {
+        echo "WARNING: SDM HMOD FW not found: %s" % $sdm_hmod_fw_image_filename
+        $sdm_hmod_fw_image_filename = ""
+    }
+}
+
+output-radix base = 16
+
+$hps_apu_fsbl_image_filename = ""
+# Keep an empty SD card attached so sdmmc_combophy does not spam
+# "SD/eMMC card device is not connected!". OS image stays on USB only.
+if not defined create_hps_sd_card { $create_hps_sd_card = TRUE }
+$create_hps_sd_card1 = FALSE
+$create_hps_mmc = FALSE
+$create_hps_mmc1 = FALSE
+$create_hps_eth0_network = FALSE
+$create_hps_apu_serial0_console = TRUE
+$create_hps_apu_serial1_console = FALSE
+$create_hps_apu_serial2_console = FALSE
+
+if not defined console_telnet_port { $console_telnet_port = 9123 }
+
+if not (lookup-file $spl_bin -query) {
+    echo "ERROR: missing SPL: %s" % $spl_bin
+    exit 1
+}
+if not (lookup-file $ssbl_image -query) {
+    echo "ERROR: missing u-boot.itb: %s" % $ssbl_image
+    exit 1
+}
+if not (lookup-file $wic_image -query) {
+    echo "ERROR: missing WIC: %s" % $wic_image
+    exit 1
+}
+
+$spl_bin = (lookup-file $spl_bin)
+$ssbl_image = (lookup-file $ssbl_image)
+$wic_image = (lookup-file $wic_image)
+if (lookup-file $bl31_bin -query) {
+    $bl31_bin = (lookup-file $bl31_bin)
+}
+if (lookup-file $dtb_image -query) {
+    $dtb_image = (lookup-file $dtb_image)
+}
+
+# Same WIC as SDMMC boot — attach to USB3 SuperSpeed mass-storage only.
+$usb3_image_filename = $wic_image
+$usb3_hs_image_filename = ""
+$usb_otg_image_filename = ""
+$sd_image_filename0 = ""
+
+echo "USB boot: loading WIC onto usb3_disk: %s" % $usb3_image_filename
+echo "  U-Boot usbdev=%s  Linux root=%s" % [$usb_uboot_dev, $usb_linux_root]
+
+run-command-file (sim->project + "/targets/km/agilex72-universal-fixed.simics")
+
+# Drop empty HS/OTG sticks so the WIC on SuperSpeed is usb 0 / /dev/sda.
+disconnect system.board.fpga.usb2_slot system.board.usb3_hs_disk.connector_usb_host
+disconnect system.board.fpga.otg_slot system.board.usbotg_disk.connector_usb_host
+echo "USB boot: disconnected empty HS + OTG mass-storage"
+
+$hps = system.board.fpga.hps
+$con = $hps.lsp.console0.con
+$con.show
+if $console_telnet_port != 0 {
+    $con.telnet-setup $console_telnet_port
+    echo "UART0 telnet: telnet 127.0.0.1 %d" % $console_telnet_port
+}
+
+# Quiet SDMMC / OSPI probe noise (empty SD attached; OSPI constregs incomplete).
+try { $hps.lsp.sdmmc_combophy0.log-level 0 } except { }
+try { $hps.lsp.sdmmc.log-level 0 } except { }
+try {
+    log-level system.board.fpga.hps.lsp.sdmmc_combophy0.port.dfi_mmc_intf_in 0
+} except { }
+try { $hps.lsp.ospi_combophy0.log-level 0 } except { }
+try { $hps.lsp.ospi0.log-level -r 0 } except { }
+try { $hps.lsp.ospi0.bank.constregs.log-level 0 } except { }
+
+# U-Boot probes OSPI during bring-up — deassert combophy *before* first run,
+# otherwise combophy_bank "Device in Reset" critical spam (and later Linux xSPI).
+echo "Deassert KM OSPI combophy hard/soft reset (pre-boot)"
+@import os
+@exec(open(os.environ.get("SIMICS_PROJECT", conf.sim.project) + "/scripts/km_ospi_combophy_deassert.py").read())
+
+$hps.apu.phys_mem.load-file $spl_bin 0x0
+psel $hps.apu.mpu.cores[0]
+penable
+enable-debugger
+load-file $ssbl_image 0x82000000
+if defined dtb_image {
+    if $dtb_image != "" {
+        load-file $dtb_image 0x88000000
+    }
+}
+
+# Normalize CLI flags (Simics may pass bool or string "TRUE").
+if not defined stop_at_uboot { $stop_at_uboot = FALSE }
+if not defined uboot_menu { $uboot_menu = FALSE }
+@simenv.stop_at_uboot = str(simenv.stop_at_uboot).strip().lower() in ("1", "true", "yes", "on")
+@simenv.uboot_menu = str(simenv.uboot_menu).strip().lower() in ("1", "true", "yes", "on")
+echo "flags: stop_at_uboot=%s  uboot_menu=%s" % [$stop_at_uboot, $uboot_menu]
+
+script-branch {
+    bp.console_string.wait-then-write $con "Hit any key to stop autoboot" "\r"
+}
+script-branch {
+    bp.console_string.wait-for $con "SOCFPGA_KM # "
+    stop
+}
+run
+
+# After stop, script continues with sim paused — do not fall into boot_usb
+# when the user asked to stay in U-Boot.
+if $stop_at_uboot {
+    echo "stop_at_uboot=TRUE — paused at U-Boot prompt (no boot_usb)."
+    echo "  simics> run"
+    echo "  telnet 127.0.0.1 %d" % $console_telnet_port
+    echo "    SOCFPGA_KM # bootmenu"
+    echo "    SOCFPGA_KM # setenv usbdev %s; setenv usbroot %s; run boot_usb" % [$usb_uboot_dev, $usb_linux_root]
+    # Stay paused; do not call run again.
+} else if $uboot_menu {
+    echo "uboot_menu=TRUE — running U-Boot bootmenu (no auto boot_usb)"
+    echo "Cluster PPU ON @ 0x08030000"
+    $hps.apu.phys_mem.write address = 0x08030000 value = 0x8 size = 4
+    script-branch {
+        bp.console_string.wait-for $con "SOCFPGA_KM # "
+        $con.input "bootmenu\r"
+        echo "=== bootmenu issued — pick 1=QSPI 2=SDMMC/eMMC 3=USB 4=Network ==="
+        echo "=== telnet 127.0.0.1 %d ===" % $console_telnet_port
+    }
+    run
+} else {
+    echo "Cluster PPU ON @ 0x08030000"
+    $hps.apu.phys_mem.write address = 0x08030000 value = 0x8 size = 4
+
+    echo "USB boot: run boot_usb (usbdev=%s usbroot=%s)" % [$usb_uboot_dev, $usb_linux_root]
+    $con.input ("setenv usbdev " + $usb_uboot_dev + "\r")
+    script-branch {
+        bp.console_string.wait-for $con "SOCFPGA_KM # "
+        $con.input ("setenv usbroot " + $usb_linux_root + "\r")
+    }
+    script-branch {
+        bp.console_string.wait-for $con "SOCFPGA_KM # "
+        $con.input "run boot_usb\r"
+        echo "=== boot_usb issued — expect root on USB WIC ==="
+    }
+    run
+}

@@ -17,6 +17,9 @@
 # Run:
 #   ./scripts/run-osbv-smp-usb31-usbip.sh
 #   REQUIRE_USBIP_BRIDGE=1 ./scripts/run-osbv-smp-usb31-usbip.sh   # fail if no model
+# Stay at U-Boot (no booti) for usb start / debug:
+#   ./scripts/run-osbv-smp-usb31-usbip.sh stop_at_uboot=TRUE
+#   then: simics> run   and telnet 127.0.0.1 9123 → SOCFPGA_KM #
 # =============================================================================
 
 add-directory "%script%"
@@ -152,6 +155,8 @@ enable-debugger
 load-file $ssbl_image 0x82000000
 load-file $dtb_image 0x88000000
 
+if not defined stop_at_uboot { $stop_at_uboot = FALSE }
+
 script-branch {
     bp.console_string.wait-then-write $con "Hit any key to stop autoboot" "\r"
 }
@@ -161,24 +166,31 @@ script-branch {
 }
 run
 
-load-file $kernel_image 0x82000000
+if $stop_at_uboot {
+    echo "stop_at_uboot=TRUE — at U-Boot (no booti). Script ends here."
+    echo "  simics> run"
+    echo "  telnet 127.0.0.1 %d   → SOCFPGA_KM #" % $console_telnet_port
+    echo "NOTE: usb31 is in device mode here; for USB host use run-osbv-smp.sh."
+} else {
+    load-file $kernel_image 0x82000000
 
-echo "Deassert KM OSPI combophy hard/soft reset"
-@import os
-@exec(open(os.environ.get("SIMICS_PROJECT", conf.sim.project) + "/scripts/km_ospi_combophy_deassert.py").read())
+    echo "Deassert KM OSPI combophy hard/soft reset"
+    @import os
+    @exec(open(os.environ.get("SIMICS_PROJECT", conf.sim.project) + "/scripts/km_ospi_combophy_deassert.py").read())
 
-echo "Cluster PPU ON @ 0x08030000"
-$hps.apu.phys_mem.write address = 0x08030000 value = 0x8 size = 4
+    echo "Cluster PPU ON @ 0x08030000"
+    $hps.apu.phys_mem.write address = 0x08030000 value = 0x8 size = 4
 
-echo "Injecting bootargs + booti: %s" % $bootargs
-$con.input ("setenv bootargs " + $bootargs + "\r")
-script-branch {
-    bp.console_string.wait-for $con "SOCFPGA_KM # "
-    $con.input "printenv bootargs\r"
+    echo "Injecting bootargs + booti: %s" % $bootargs
+    $con.input ("setenv bootargs " + $bootargs + "\r")
+    script-branch {
+        bp.console_string.wait-for $con "SOCFPGA_KM # "
+        $con.input "printenv bootargs\r"
+    }
+    script-branch {
+        bp.console_string.wait-for $con "SOCFPGA_KM # "
+        $con.input "booti 0x82000000 - 0x88000000\r"
+        echo "=== booti — USB31 device + USBIP Variant S; guest: overlay + gadget setup ==="
+    }
+    run
 }
-script-branch {
-    bp.console_string.wait-for $con "SOCFPGA_KM # "
-    $con.input "booti 0x82000000 - 0x88000000\r"
-    echo "=== booti — USB31 device + USBIP Variant S; guest: overlay + gadget setup ==="
-}
-run

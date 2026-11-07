@@ -118,6 +118,8 @@ enable-debugger
 load-file $ssbl_image 0x82000000
 load-file $dtb_image 0x88000000
 
+if not defined stop_at_uboot { $stop_at_uboot = FALSE }
+
 script-branch {
     bp.console_string.wait-then-write $con "Hit any key to stop autoboot" "\r"
 }
@@ -127,28 +129,36 @@ script-branch {
 }
 run
 
-load-file $kernel_image 0x82000000
+# After the stop above, the *script* continues immediately (sim is paused).
+# Must NOT fall through into booti when stopping for interactive U-Boot.
+if $stop_at_uboot {
+    echo "stop_at_uboot=TRUE — at U-Boot (no booti). Script ends here."
+    echo "  simics> run"
+    echo "  telnet 127.0.0.1 %d   → SOCFPGA_KM #  (usb start / usb tree)" % $console_telnet_port
+} else {
+    load-file $kernel_image 0x82000000
 
-# KM HPS OSPI / Cadence xSPI: combophy aux MMIO is blocked while
-# ospi_combophy0.bank.combophy_bank is held in reset (Simics critical).
-# ospi_rst_state is already deasserted by U-Boot time; release combophy
-# hard-reset here so cadence-xspi PHY/aux reads succeed.
-echo "Deassert KM OSPI combophy hard/soft reset"
-@import os
-@exec(open(os.environ.get("SIMICS_PROJECT", conf.sim.project) + "/scripts/km_ospi_combophy_deassert.py").read())
+    # KM HPS OSPI / Cadence xSPI: combophy aux MMIO is blocked while
+    # ospi_combophy0.bank.combophy_bank is held in reset (Simics critical).
+    # ospi_rst_state is already deasserted by U-Boot time; release combophy
+    # hard-reset here so cadence-xspi PHY/aux reads succeed.
+    echo "Deassert KM OSPI combophy hard/soft reset"
+    @import os
+    @exec(open(os.environ.get("SIMICS_PROJECT", conf.sim.project) + "/scripts/km_ospi_combophy_deassert.py").read())
 
-echo "Cluster PPU ON @ 0x08030000"
-$hps.apu.phys_mem.write address = 0x08030000 value = 0x8 size = 4
+    echo "Cluster PPU ON @ 0x08030000"
+    $hps.apu.phys_mem.write address = 0x08030000 value = 0x8 size = 4
 
-echo "Injecting bootargs + booti: %s" % $bootargs
-$con.input ("setenv bootargs " + $bootargs + "\r")
-script-branch {
-    bp.console_string.wait-for $con "SOCFPGA_KM # "
-    $con.input "printenv bootargs\r"
+    echo "Injecting bootargs + booti: %s" % $bootargs
+    $con.input ("setenv bootargs " + $bootargs + "\r")
+    script-branch {
+        bp.console_string.wait-for $con "SOCFPGA_KM # "
+        $con.input "printenv bootargs\r"
+    }
+    script-branch {
+        bp.console_string.wait-for $con "SOCFPGA_KM # "
+        $con.input "booti 0x82000000 - 0x88000000\r"
+        echo "=== booti issued — expect nproc=4 ==="
+    }
+    run
 }
-script-branch {
-    bp.console_string.wait-for $con "SOCFPGA_KM # "
-    $con.input "booti 0x82000000 - 0x88000000\r"
-    echo "=== booti issued — expect nproc=4 ==="
-}
-run

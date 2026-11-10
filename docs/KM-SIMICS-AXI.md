@@ -1,6 +1,6 @@
 # How AXI / interconnect is modeled in KM Simics
 
-Platform: `agilex72-universal` / KM HPS (`km_hps_dsu_120`, `intel-fpga-main`).
+Platform: `agilex27-universal` / KM HPS (`km_hps_dsu_120`, `intel-fpga-main`).
 
 ## One-line summary
 
@@ -42,7 +42,7 @@ system.board.fpga.{noc|public_noc|sdm|…}
 
 | Layer | Class | Package path |
 |-------|-------|--------------|
-| System | `km_universal_system_comp` | `platforms/agilex72-universal/modules/km-universal-system-comp/` |
+| System | `km_universal_system_comp` | `platforms/agilex27-universal/modules/km-universal-system-comp/` |
 | Board | `km_universal_board_comp` | `…/km-universal-board-comp/` |
 | FPGA | `km_universal_fpga_comp` | `…/km-universal-fpga-comp/` |
 | HPS | `km_hps_comp` | `simmod/km_hps_comp/` |
@@ -161,7 +161,7 @@ Guest still needs `osvloaddtoverlay km-usb31-gadget` (+ rebind/reboot).
 
 | Area | Path |
 |------|------|
-| FPGA wiring | `platforms/agilex72-universal/modules/km-universal-fpga-comp/` |
+| FPGA wiring | `platforms/agilex27-universal/modules/km-universal-fpga-comp/` |
 | HPS / HSP / LSP | `simmod/km_{hps,hsp,lsp}_comp/` |
 | NOC / bridges | `km-{hsp,lsp,public}-noc.so`, `km-{mnoc,rnoc}-bridge.so` |
 | VSIP OSBV | this repo `vsip-memsrc/`, `vsip-memsink/` |

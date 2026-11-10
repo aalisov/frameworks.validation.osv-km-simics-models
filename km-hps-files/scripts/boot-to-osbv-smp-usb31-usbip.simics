@@ -122,7 +122,7 @@ if (lookup-file $bl31_bin -query) {
 
 $sd_image_filename0 = $sd_image
 
-run-command-file (sim->project + "/targets/km/agilex72-universal-fixed.simics")
+run-command-file (sim->project + "/targets/km/agilex27-universal-fixed.simics")
 
 echo "Configure USB31 device mode (disconnect MSC, host_mode=FALSE, NOC->xDCI)"
 @import os
@@ -152,9 +152,8 @@ $hps.apu.phys_mem.load-file $spl_bin 0x0
 psel $hps.apu.mpu.cores[0]
 penable
 enable-debugger
-load-file $ssbl_image 0x82000000
-load-file $dtb_image 0x88000000
-
+$hps.apu.phys_mem.load-file $ssbl_image 0x82000000
+$hps.apu.phys_mem.load-file $dtb_image 0x88000000
 if not defined stop_at_uboot { $stop_at_uboot = FALSE }
 
 script-branch {
@@ -172,8 +171,7 @@ if $stop_at_uboot {
     echo "  telnet 127.0.0.1 %d   → SOCFPGA_KM #" % $console_telnet_port
     echo "NOTE: usb31 is in device mode here; for USB host use run-osbv-smp.sh."
 } else {
-    load-file $kernel_image 0x82000000
-
+    $hps.apu.phys_mem.load-file $kernel_image 0x82000000
     echo "Deassert KM OSPI combophy hard/soft reset"
     @import os
     @exec(open(os.environ.get("SIMICS_PROJECT", conf.sim.project) + "/scripts/km_ospi_combophy_deassert.py").read())

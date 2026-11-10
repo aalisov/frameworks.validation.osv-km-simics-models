@@ -123,7 +123,7 @@ _km_hps_simics_python_pkg() {
   echo "$py"
 }
 
-_sdm="$SIMICS_FPGA_ROOT/platforms/agilex72-universal/binaries/sdm_hmod_fw/sdm_hmod_fw.hex"
+_sdm="$SIMICS_FPGA_ROOT/platforms/agilex27-universal/binaries/sdm_hmod_fw/sdm_hmod_fw.hex"
 if [[ -f "$_sdm" ]]; then
   export SDM_HMOD_FW="$_sdm"
 elif [[ -f "$SIMICS_PROJECT/binaries/sdm_hmod_fw/sdm_hmod_fw.hex" ]]; then

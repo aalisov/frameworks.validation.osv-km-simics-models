@@ -62,7 +62,12 @@ $create_hps_sd_card = TRUE
 $create_hps_sd_card1 = FALSE
 $create_hps_mmc = FALSE
 $create_hps_mmc1 = FALSE
-$create_hps_eth0_network = FALSE
+# Default OFF: gmac1+MDIO TX can wedge Simics (NETDEV WATCHDOG). Opt-in:
+#   ./scripts/run-osbv-smp.sh create_hps_eth0_network=TRUE
+# then guest: setup-simics-eth.sh  (10.10.0.100 ↔ service-node 10.10.0.1)
+if not defined create_hps_eth0_network {
+    $create_hps_eth0_network = FALSE
+}
 $create_hps_apu_serial0_console = TRUE
 $create_hps_apu_serial1_console = FALSE
 $create_hps_apu_serial2_console = FALSE
@@ -101,7 +106,17 @@ if (lookup-file $bl31_bin -query) {
 
 $sd_image_filename0 = $sd_image
 
-run-command-file (sim->project + "/targets/km/agilex72-universal-fixed.simics")
+run-command-file (sim->project + "/targets/km/agilex27-universal-fixed.simics")
+
+# Host SSH NAPT only when eth network was created (service-node + switch).
+if $create_hps_eth0_network {
+    echo "Host eth forward (GUEST_ETH_IP default 10.10.0.100) — TX may hang sim"
+    @import os
+    @exec(open(os.environ.get("SIMICS_PROJECT", conf.sim.project) + "/scripts/km_simics_eth_host_fwd.py").read())
+} else {
+    echo "Eth network OFF (default). Console: telnet 127.0.0.1 (console_telnet_port)"
+    echo "  Opt-in: create_hps_eth0_network=TRUE then guest setup-simics-eth.sh"
+}
 
 $hps = system.board.fpga.hps
 $con = $hps.lsp.console0.con
@@ -115,9 +130,8 @@ $hps.apu.phys_mem.load-file $spl_bin 0x0
 psel $hps.apu.mpu.cores[0]
 penable
 enable-debugger
-load-file $ssbl_image 0x82000000
-load-file $dtb_image 0x88000000
-
+$hps.apu.phys_mem.load-file $ssbl_image 0x82000000
+$hps.apu.phys_mem.load-file $dtb_image 0x88000000
 if not defined stop_at_uboot { $stop_at_uboot = FALSE }
 
 script-branch {
@@ -136,8 +150,7 @@ if $stop_at_uboot {
     echo "  simics> run"
     echo "  telnet 127.0.0.1 %d   → SOCFPGA_KM #  (usb start / usb tree)" % $console_telnet_port
 } else {
-    load-file $kernel_image 0x82000000
-
+    $hps.apu.phys_mem.load-file $kernel_image 0x82000000
     # KM HPS OSPI / Cadence xSPI: combophy aux MMIO is blocked while
     # ospi_combophy0.bank.combophy_bank is held in reset (Simics critical).
     # ospi_rst_state is already deasserted by U-Boot time; release combophy

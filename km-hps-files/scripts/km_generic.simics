@@ -20,7 +20,7 @@
 #
 # PATH OVERRIDES (portability - defaults work for a standard checkout):
 #   UBOOT_DIR=./uboot          u-boot.itb, u-boot-spl-dtb.bin/.hex, bl31.elf, u-boot
-#   IMG_DIR=./soc-hps-bin      Image, initrd135.uboot, socfpga_agilex72_socdk.dtb, *.wic,
+#   IMG_DIR=./soc-hps-bin      Image, initrd135.uboot, socfpga_agilex27_socdk.dtb, *.wic,
 #                              test.elf, output_file_jic.rpd
 #   BM_DIR=./baremetal         baremetal payload dir
 #   SCRATCH_DIR=/tmp           writable dir for UART log / temp files (per-user)
@@ -187,7 +187,7 @@ if not defined initrd_image {
 }
 # DTB must match the built kernel/branch. The KM branch uses socfpga_km.dtb,
 # whose UART node references a fixed 18.432 MHz uart0_baud_clk (matching BL31);
-# the agilex72 SoCDK dtb instead wires the UART to the Agilex72 clock manager,
+# the agilex27 SoCDK dtb instead wires the UART to the Agilex27 clock manager,
 # which the KM model does not provide, so dw-apb-uart never registers ttyS0 and
 # the kernel panics with "unable to open an initial console". Override with
 # DTB_NAME=... on the command line for other targets.
@@ -234,7 +234,7 @@ if (($BOOT_MEDIA == "sd") or ($BOOT_METHOD == "sd")) {
     $sd_img = ""
 }
 # SDMMC SMMU test: attach the .wic as an SD card on mmc0 even for a backdoor
-# (RAM) boot, so the backdoored socfpga_agilex72_socdk.dtb (mmc0 iommus=<&smmu 5>) is used
+# (RAM) boot, so the backdoored socfpga_agilex27_socdk.dtb (mmc0 iommus=<&smmu 5>) is used
 # while Linux still enumerates a real card to DMA against through the SMMU.
 if $SDMMC_SMMU_TEST {
     if not (lookup-file $sd_image -query) {
@@ -306,7 +306,7 @@ if $TARGET == "mudv" {
 } else {
     # Use fixed local target: bypasses broken regs_PSS.skip_reg_internal_filter
     # and powers on DSU cluster/core PPUs at boot (needed for SMP).
-    $TARGET_SCRIPT = (sim->project + "/targets/km/agilex72-universal-fixed.simics")
+    $TARGET_SCRIPT = (sim->project + "/targets/km/agilex27-universal-fixed.simics")
     $hps_s    = "system.board.fpga.hps"
     $sdm_s    = "system.board.fpga.sdm"
     $pinmux_s = "system.board.fpga.sdm.pinmux"
@@ -482,7 +482,7 @@ if not (($TARGET == "universal") and ($BOOT_METHOD == "backdoor")) {
 # XSPI pinmux configuration (optional — not required for RAM backdoor boot) (pinmux path differs: universal=sdm.pinmux,
 # mudv=sdm.ana.pinmux; handled by $pinmux_s above).
 #
-# The agilex72-universal km_sdm_pinmux model renamed the pin-select registers:
+# The agilex27-universal km_sdm_pinmux model renamed the pin-select registers:
 # old PIN(n)SEL now maps by offset to PIN_IO_x_SEL[n-7] (PIN1..PIN6 became the
 # named PIN_IO_{TDO,TCK,TDI,TMS,NCONFIG,REFCLK}_SEL). Offsets are unchanged, so
 # only the names differ. mudv keeps the legacy PIN(n)SEL names.

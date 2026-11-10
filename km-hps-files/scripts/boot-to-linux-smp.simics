@@ -3,7 +3,7 @@
 # =============================================================================
 #
 # Requires: source ~/km-hps/set_simics_env_main.sh
-# Target:   targets/km/agilex72-universal-fixed.simics (km_hps_dsu_120)
+# Target:   targets/km/agilex27-universal-fixed.simics (km_hps_dsu_120)
 #
 # Initrd: default images/emul/initrd_emul.uboot is no-SVE busybox — pass
 #   bootargs="nosmp arm64.nosve ..." or use SVE userspace initrd (Yocto SVE build).
@@ -89,7 +89,17 @@ echo "DTB     -> %s" % $dtb_image
 echo "initrd  -> %s" % $initrd_image
 echo "bootargs-> %s" % $bootargs
 
-run-command-file (sim->project + "/targets/km/agilex72-universal-fixed.simics")
+run-command-file (sim->project + "/targets/km/agilex27-universal-fixed.simics")
+
+# Host SSH NAPT only when eth network was created (service-node + switch).
+if $create_hps_eth0_network {
+    echo "Host eth forward (GUEST_ETH_IP default 10.10.0.100) — TX may hang sim"
+    @import os
+    @exec(open(os.environ.get("SIMICS_PROJECT", conf.sim.project) + "/scripts/km_simics_eth_host_fwd.py").read())
+} else {
+    echo "Eth network OFF (default). Console: telnet 127.0.0.1 (console_telnet_port)"
+    echo "  Opt-in: create_hps_eth0_network=TRUE then guest setup-simics-eth.sh"
+}
 
 $hps = system.board.fpga.hps
 $con = $hps.lsp.console0.con
@@ -103,9 +113,8 @@ $hps.apu.phys_mem.load-file $spl_bin 0x0
 psel $hps.apu.mpu.cores[0]
 penable
 enable-debugger
-load-file $ssbl_image 0x82000000
-load-file $dtb_image 0x88000000
-
+$hps.apu.phys_mem.load-file $ssbl_image 0x82000000
+$hps.apu.phys_mem.load-file $dtb_image 0x88000000
 echo "=== Stage-1: run until SOCFPGA_KM # ==="
 
 script-branch {
@@ -118,9 +127,8 @@ script-branch {
 }
 run
 
-load-file $kernel_image 0x82000000
-load-file $initrd_image 0x90000000
-
+$hps.apu.phys_mem.load-file $kernel_image 0x82000000
+$hps.apu.phys_mem.load-file $initrd_image 0x90000000
 echo "Cluster PPU ON @ 0x08030000 (DSU power hierarchy for Simics)"
 $hps.apu.phys_mem.write address = 0x08030000 value = 0x8 size = 4
 

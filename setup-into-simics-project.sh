@@ -193,7 +193,7 @@ install_scripts() {
     info "  + docs/ (ETH/USBIP/…)"
   fi
 
-  # targets/km (agilex72-universal-fixed.simics + SMP fixup wrapper)
+  # targets/km (agilex27-universal-fixed.simics + SMP fixup wrapper)
   if [[ -d "$HPS_FILES/targets" ]]; then
     mkdir -p "$PROJECT/targets"
     if command -v rsync >/dev/null 2>&1; then
@@ -232,13 +232,13 @@ install_board_with_vsip() {
   [[ -f "$patch" ]] || die "missing board patch: $patch"
 
   # Prefer platform module tree (has Makefile + sources).
-  if [[ -n "${SIMICS_FPGA_ROOT:-}" && -f "$SIMICS_FPGA_ROOT/platforms/agilex72-universal/modules/km-universal-board-comp/km_universal_board_comp.py" ]]; then
-    src="$SIMICS_FPGA_ROOT/platforms/agilex72-universal/modules/km-universal-board-comp"
+  if [[ -n "${SIMICS_FPGA_ROOT:-}" && -f "$SIMICS_FPGA_ROOT/platforms/agilex27-universal/modules/km-universal-board-comp/km_universal_board_comp.py" ]]; then
+    src="$SIMICS_FPGA_ROOT/platforms/agilex27-universal/modules/km-universal-board-comp"
   elif [[ -n "${SIMICS_BASE:-}" ]]; then
     local cand
     for cand in \
-      "$(dirname "$SIMICS_BASE")/platforms/agilex72-universal/modules/km-universal-board-comp" \
-      "$SIMICS_BASE/../platforms/agilex72-universal/modules/km-universal-board-comp"
+      "$(dirname "$SIMICS_BASE")/platforms/agilex27-universal/modules/km-universal-board-comp" \
+      "$SIMICS_BASE/../platforms/agilex27-universal/modules/km-universal-board-comp"
     do
       if [[ -f "$cand/km_universal_board_comp.py" ]]; then
         src="$(cd "$cand" && pwd)"

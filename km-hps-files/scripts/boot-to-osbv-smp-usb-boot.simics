@@ -110,7 +110,7 @@ $sd_image_filename0 = ""
 echo "USB boot: loading WIC onto usb3_disk: %s" % $usb3_image_filename
 echo "  U-Boot usbdev=%s  Linux root=%s" % [$usb_uboot_dev, $usb_linux_root]
 
-run-command-file (sim->project + "/targets/km/agilex72-universal-fixed.simics")
+run-command-file (sim->project + "/targets/km/agilex27-universal-fixed.simics")
 
 # Drop empty HS/OTG sticks so the WIC on SuperSpeed is usb 0 / /dev/sda.
 disconnect system.board.fpga.usb2_slot system.board.usb3_hs_disk.connector_usb_host
@@ -145,10 +145,10 @@ $hps.apu.phys_mem.load-file $spl_bin 0x0
 psel $hps.apu.mpu.cores[0]
 penable
 enable-debugger
-load-file $ssbl_image 0x82000000
+$hps.apu.phys_mem.load-file $ssbl_image 0x82000000
 if defined dtb_image {
     if $dtb_image != "" {
-        load-file $dtb_image 0x88000000
+        $hps.apu.phys_mem.load-file $dtb_image 0x88000000
     }
 }
 

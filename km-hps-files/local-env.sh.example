@@ -14,4 +14,4 @@
 # export SIMICS_FPGA_ROOT="$HOME/altera_pro/intel-fpga-ext_main/simics"
 
 # Optional SDM HMOD firmware override:
-# export SDM_HMOD_FW="$SIMICS_FPGA_ROOT/platforms/agilex72-universal/binaries/sdm_hmod_fw/sdm_hmod_fw.hex"
+# export SDM_HMOD_FW="$SIMICS_FPGA_ROOT/platforms/agilex27-universal/binaries/sdm_hmod_fw/sdm_hmod_fw.hex"

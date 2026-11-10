@@ -1,4 +1,4 @@
-# KM agilex72-universal with Simics SMP fixups.
+# KM agilex27-universal with Simics SMP fixups.
 #
 # Prefer the platform target that matches the active Simics FPGA package
 # (intel-fpga_main → km_hps_dsu_120). Fall back to the project-local copy
@@ -9,8 +9,8 @@
 
 @import os
 @ _fpga = os.environ.get("SIMICS_FPGA_ROOT", "")
-@ _plat = os.path.join(_fpga, "platforms/agilex72-universal/targets/agilex72-universal/agilex72-universal.simics")
-@ _proj = os.path.join(os.environ.get("SIMICS_PROJECT", simics.SIM_get_object("sim").project), "targets/agilex72-universal/agilex72-universal.simics")
+@ _plat = os.path.join(_fpga, "platforms/agilex27-universal/targets/agilex27-universal/agilex27-universal.simics")
+@ _proj = os.path.join(os.environ.get("SIMICS_PROJECT", simics.SIM_get_object("sim").project), "targets/agilex27-universal/agilex27-universal.simics")
 # Prefer platform target on intel-fpga_main (newer secmgr API). On intel-fpga-ext
 # 26.3, prefer the project-local copy so a stale SIMICS_FPGA_ROOT / mixed
 # package-list cannot load a platform script against the wrong secmgr model.

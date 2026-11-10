@@ -1,4 +1,4 @@
-# Simics fixups for agilex72-universal on km-hps.
+# Simics fixups for agilex27-universal on km-hps.
 #
 # Old Simics (intel-fpga-ext, arm_dsu_120): PPU MMIO is missing inside lsp_periphs.
 # Map 4KB set-memory stubs so ATF/Linux SMP writes do not abort the script.

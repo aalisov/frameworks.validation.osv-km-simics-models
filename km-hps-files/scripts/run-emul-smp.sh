@@ -3,6 +3,7 @@
 #
 #   source ~/km-hps/set_simics_env_main.sh
 #   ./scripts/run-emul-smp.sh              # maxcpus=4, SVE userspace
+#   ./scripts/run-emul-smp.sh stop_at_uboot=TRUE  # pause at U-Boot (no booti)
 #   EMUL_NOSMP=1 ./scripts/run-emul-smp.sh # nosmp (debug)
 #   EMUL_NOSVE=1 ./scripts/run-emul-smp.sh # arm64.nosve + ~14MiB nosve initrd
 set -euo pipefail

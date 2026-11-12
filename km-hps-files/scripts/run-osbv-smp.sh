@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 # KM osbv on intel-fpga-main: SMP + SVE on (default mainline).
+#
+#   ./scripts/run-osbv-smp.sh                 # interactive U-Boot bootmenu
+#   ./scripts/run-osbv-smp.sh uboot_menu=2    # auto SDMMC → Linux
+#   ./scripts/run-osbv-smp.sh stop_at_uboot=TRUE
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 unset SIMICS_BASE SIMICS_BASE_PACKAGE SIMICS_FPGA_ROOT SIMICS_PYTHON_PACKAGE SIMICS_PYTHON

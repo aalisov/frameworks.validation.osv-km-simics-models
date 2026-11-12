@@ -2,10 +2,11 @@
 # KM emul on intel-fpga-main: SMP + SVE on by default.
 #
 #   source ~/km-hps/set_simics_env_main.sh
-#   ./scripts/run-emul-smp.sh              # maxcpus=4, SVE userspace
-#   ./scripts/run-emul-smp.sh stop_at_uboot=TRUE  # pause at U-Boot (no booti)
-#   EMUL_NOSMP=1 ./scripts/run-emul-smp.sh # nosmp (debug)
-#   EMUL_NOSVE=1 ./scripts/run-emul-smp.sh # arm64.nosve + ~14MiB nosve initrd
+#   ./scripts/run-emul-smp.sh                 # interactive U-Boot bootmenu
+#   ./scripts/run-emul-smp.sh uboot_menu=5    # auto RAM/initrd → Linux
+#   ./scripts/run-emul-smp.sh stop_at_uboot=TRUE
+#   EMUL_NOSMP=1 ./scripts/run-emul-smp.sh    # nosmp (debug)
+#   EMUL_NOSVE=1 ./scripts/run-emul-smp.sh    # arm64.nosve + ~14MiB nosve initrd
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 unset SIMICS_BASE SIMICS_BASE_PACKAGE SIMICS_FPGA_ROOT SIMICS_PYTHON_PACKAGE SIMICS_PYTHON

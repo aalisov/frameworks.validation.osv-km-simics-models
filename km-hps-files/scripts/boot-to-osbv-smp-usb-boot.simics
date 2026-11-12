@@ -71,7 +71,10 @@ if not defined create_hps_sd_card { $create_hps_sd_card = TRUE }
 $create_hps_sd_card1 = FALSE
 $create_hps_mmc = FALSE
 $create_hps_mmc1 = FALSE
-$create_hps_eth0_network = FALSE
+# Default OFF (gmac TX can wedge). Opt-in: create_hps_eth0_network=TRUE
+if not defined create_hps_eth0_network {
+	$create_hps_eth0_network = FALSE
+}
 $create_hps_apu_serial0_console = TRUE
 $create_hps_apu_serial1_console = FALSE
 $create_hps_apu_serial2_console = FALSE

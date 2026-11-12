@@ -3,23 +3,33 @@ Subject: [PATCH] marvell_phy: AN stub 1G-full + mmd_default C22 forward
 
 KM OSBV Simics (board.phy1): stock model left AN unimplemented and
 mmd_default C22 as spec-viol zeros, which stalled Linux marvell/stmmac
-MDIO. Stub AN complete as 1000/full and forward non-copper-page C22
-to mmd_phy; quiet unimplemented MDIO45.
+and U-Boot genphy (BMSR an_complete). Stub AN as 1000/full, set
+an_complete, and forward non-copper-page C22 to mmd_phy.
 
 Off-tree Makefile VPATH tweaks for ~/km-hps are intentionally omitted.
 
 Upstream-Status: Pending [KM Simics bring-up]
 
 diff --git a/fpga-soc/modules/external/marvell/marvell_phy/marvell_phy.dml b/fpga-soc/modules/external/marvell/marvell_phy/marvell_phy.dml
-index a3c4d95ca5..41856af4d7 100644
+index 1b45a8743c..095ea74134 100644
 --- a/fpga-soc/modules/external/marvell/marvell_phy/marvell_phy.dml
 +++ b/fpga-soc/modules/external/marvell/marvell_phy/marvell_phy.dml
-@@ -964,8 +964,18 @@ bank mmd_phy {
+@@ -932,6 +932,7 @@ bank mmd_phy {
+         }
+         method link_up() {
+             status.link_status.val = status.status_link = 1;
++            status.an_complete.val = 1;
+             mac.ieee_802_3_mac_v3.link_status_changed(phy_address.val,
+                     status.link_status.val == 1? IEEE_link_up:IEEE_link_down);
+             speed_duplex();
+@@ -964,8 +965,23 @@ bank mmd_phy {
          method write_register(uint64 value, uint64 enabled_bytes, void *aux) {
              default(value, enabled_bytes, aux);
              if (an_restart == true) {
 +                // Minimal AN stub: model had no AN; complete as 1G full so
-+                // Linux stmmac/marvell driver can leave polling and use RGMII.
++                // Linux stmmac/marvell and U-Boot genphy can leave polling.
++                // Set status.an_complete here: U-Boot reads BMSR once per poll
++                // and samples bit5 before bit2's link_status.read() side-effect.
                  restart_an.val = 0;
 -                log unimpl, 2: "Auto-negotiation is not implemented";
 +                an_restart = false;
@@ -28,13 +38,16 @@ index a3c4d95ca5..41856af4d7 100644
 +                ss_lsb.val = 0;
 +                duplex_mode.val = 1;
 +                new_speed = true;
++                status.an_complete.val = 1;
++                status.link_status.val = 1;
++                status.status_link = 1;
 +                log info, 2:
 +                    "AN stub: forcing 1000 MBit full duplex (was unimplemented)";
 +                link_up();
              }
              if (new_speed == true)
                  speed_duplex();
-@@ -1114,33 +1124,32 @@ bank mmd_default {
+@@ -1114,33 +1130,32 @@ bank mmd_default {
      param mappable = false;
      param register_size = 2;
  

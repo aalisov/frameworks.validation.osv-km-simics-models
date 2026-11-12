@@ -5,7 +5,10 @@
 # Requires: source ~/km-hps/set_simics_env_main.sh
 # FIT should embed bl31-sve (ATF_SVE_DEFAULT=sve). No arm64.nosve.
 #
-#   ./scripts/run-osbv-smp.sh
+#   ./scripts/run-osbv-smp.sh                 # interactive U-Boot bootmenu
+#   ./scripts/run-osbv-smp.sh uboot_menu=2    # auto SDMMC → Linux
+#   ./scripts/run-osbv-smp.sh uboot_menu=5    # RAM/initrd (needs Image+initrd in DRAM)
+#   ./scripts/run-osbv-smp.sh stop_at_uboot=TRUE
 #   telnet 127.0.0.1 9123
 # =============================================================================
 
@@ -132,7 +135,12 @@ penable
 enable-debugger
 $hps.apu.phys_mem.load-file $ssbl_image 0x82000000
 $hps.apu.phys_mem.load-file $dtb_image 0x88000000
+
 if not defined stop_at_uboot { $stop_at_uboot = FALSE }
+if not defined uboot_menu { $uboot_menu = "" }
+@import os
+@exec(open(os.environ.get("SIMICS_PROJECT", conf.sim.project) + "/scripts/km_uboot_menu_select.py").read())
+echo "=== Stage-1: U-Boot (mode=%s) ===" % $km_uboot_menu_mode
 
 script-branch {
     bp.console_string.wait-then-write $con "Hit any key to stop autoboot" "\r"
@@ -143,35 +151,37 @@ script-branch {
 }
 run
 
-# After the stop above, the *script* continues immediately (sim is paused).
-# Must NOT fall through into booti when stopping for interactive U-Boot.
-if $stop_at_uboot {
-    echo "stop_at_uboot=TRUE — at U-Boot (no booti). Script ends here."
-    echo "  simics> run"
-    echo "  telnet 127.0.0.1 %d   → SOCFPGA_KM #  (usb start / usb tree)" % $console_telnet_port
-} else {
-    $hps.apu.phys_mem.load-file $kernel_image 0x82000000
-    # KM HPS OSPI / Cadence xSPI: combophy aux MMIO is blocked while
-    # ospi_combophy0.bank.combophy_bank is held in reset (Simics critical).
-    # ospi_rst_state is already deasserted by U-Boot time; release combophy
-    # hard-reset here so cadence-xspi PHY/aux reads succeed.
-    echo "Deassert KM OSPI combophy hard/soft reset"
-    @import os
-    @exec(open(os.environ.get("SIMICS_PROJECT", conf.sim.project) + "/scripts/km_ospi_combophy_deassert.py").read())
+# After U-Boot is running, backdoor Image for optional bootmenu item 5 (RAM).
+$hps.apu.phys_mem.load-file $kernel_image 0x82000000
 
-    echo "Cluster PPU ON @ 0x08030000"
-    $hps.apu.phys_mem.write address = 0x08030000 value = 0x8 size = 4
+# KM HPS OSPI / Cadence xSPI: combophy aux MMIO is blocked while
+# ospi_combophy0.bank.combophy_bank is held in reset (Simics critical).
+echo "Deassert KM OSPI combophy hard/soft reset"
+@import os
+@exec(open(os.environ.get("SIMICS_PROJECT", conf.sim.project) + "/scripts/km_ospi_combophy_deassert.py").read())
 
-    echo "Injecting bootargs + booti: %s" % $bootargs
-    $con.input ("setenv bootargs " + $bootargs + "\r")
+echo "Cluster PPU ON @ 0x08030000"
+$hps.apu.phys_mem.write address = 0x08030000 value = 0x8 size = 4
+
+$con.input ("setenv custom_bootargs " + $bootargs + "\r")
+
+if $km_uboot_menu_mode == "prompt" {
+    echo "stop_at_uboot=TRUE — paused at U-Boot prompt."
+    echo "  simics> run ; telnet 127.0.0.1 %d" % $console_telnet_port
+} else if $km_uboot_menu_mode == "auto" {
+    echo "Auto boot: %s" % $km_uboot_menu_cmd
     script-branch {
         bp.console_string.wait-for $con "SOCFPGA_KM # "
-        $con.input "printenv bootargs\r"
+        $con.input ($km_uboot_menu_cmd + "\r")
+        echo "=== %s issued ===" % $km_uboot_menu_cmd
     }
+    run
+} else {
+    echo "Interactive bootmenu — telnet 127.0.0.1 %d" % $console_telnet_port
+    echo "  1=QSPI 2=SDMMC 3=USB 4=Network 5=RAM/initrd"
     script-branch {
         bp.console_string.wait-for $con "SOCFPGA_KM # "
-        $con.input "booti 0x82000000 - 0x88000000\r"
-        echo "=== booti issued — expect nproc=4 ==="
+        $con.input "bootmenu\r"
     }
     run
 }

@@ -9,8 +9,9 @@
 #   bootargs="nosmp arm64.nosve ..." or use SVE userspace initrd (Yocto SVE build).
 #   For full SMP+SVE, prefer ./scripts/run-km-generic-main.sh emul DUMP_CPUINFO=TRUE
 #
-#   ./scripts/run-emul-smp.sh
-#   ./scripts/run-emul-smp.sh stop_at_uboot=TRUE   # pause at SOCFPGA_KM # (no booti)
+#   ./scripts/run-emul-smp.sh                 # interactive U-Boot bootmenu
+#   ./scripts/run-emul-smp.sh uboot_menu=5    # auto RAM/initrd → Linux
+#   ./scripts/run-emul-smp.sh stop_at_uboot=TRUE  # SOCFPGA_KM # only
 #   telnet 127.0.0.1 9123
 # =============================================================================
 
@@ -120,10 +121,11 @@ enable-debugger
 $hps.apu.phys_mem.load-file $ssbl_image 0x82000000
 $hps.apu.phys_mem.load-file $dtb_image 0x88000000
 
-# Normalize CLI flags (Simics may pass bool or string "TRUE").
 if not defined stop_at_uboot { $stop_at_uboot = FALSE }
-@simenv.stop_at_uboot = str(simenv.stop_at_uboot).strip().lower() in ("1", "true", "yes", "on")
-echo "=== Stage-1: run until SOCFPGA_KM # (stop_at_uboot=%s) ===" % $stop_at_uboot
+if not defined uboot_menu { $uboot_menu = "" }
+@import os
+@exec(open(os.environ.get("SIMICS_PROJECT", conf.sim.project) + "/scripts/km_uboot_menu_select.py").read())
+echo "=== Stage-1: U-Boot (mode=%s) ===" % $km_uboot_menu_mode
 
 script-branch {
     bp.console_string.wait-then-write $con "Hit any key to stop autoboot" "\r"
@@ -135,28 +137,33 @@ script-branch {
 }
 run
 
-# After stop, script continues with sim paused — do not fall into booti
-# when the user asked to stay in U-Boot.
-if $stop_at_uboot {
-    echo "stop_at_uboot=TRUE — paused at U-Boot prompt (no booti)."
-    echo "  simics> run"
-    echo "  telnet 127.0.0.1 %d   → SOCFPGA_KM #" % $console_telnet_port
-} else {
-    $hps.apu.phys_mem.load-file $kernel_image 0x82000000
-    $hps.apu.phys_mem.load-file $initrd_image 0x90000000
-    echo "Cluster PPU ON @ 0x08030000 (DSU power hierarchy for Simics)"
-    $hps.apu.phys_mem.write address = 0x08030000 value = 0x8 size = 4
+# After U-Boot is running, backdoor Image+initrd for bootmenu option 5 (RAM).
+$hps.apu.phys_mem.load-file $kernel_image 0x82000000
+$hps.apu.phys_mem.load-file $initrd_image 0x90000000
 
-    echo "Injecting bootargs + booti (SMP maxcpus=4)"
-    $con.input ("setenv bootargs " + $bootargs + "\r")
+echo "Cluster PPU ON @ 0x08030000 (DSU power hierarchy for Simics)"
+$hps.apu.phys_mem.write address = 0x08030000 value = 0x8 size = 4
+
+# Optional: script bootargs override for boot_* (used when custom_bootargs is set)
+$con.input ("setenv custom_bootargs " + $bootargs + "\r")
+
+if $km_uboot_menu_mode == "prompt" {
+    echo "stop_at_uboot=TRUE — paused at U-Boot prompt."
+    echo "  simics> run ; telnet 127.0.0.1 %d" % $console_telnet_port
+} else if $km_uboot_menu_mode == "auto" {
+    echo "Auto boot: %s" % $km_uboot_menu_cmd
     script-branch {
         bp.console_string.wait-for $con "SOCFPGA_KM # "
-        $con.input "printenv bootargs\r"
+        $con.input ($km_uboot_menu_cmd + "\r")
+        echo "=== %s issued ===" % $km_uboot_menu_cmd
     }
+    run
+} else {
+    echo "Interactive bootmenu — telnet 127.0.0.1 %d" % $console_telnet_port
+    echo "  1=QSPI 2=SDMMC 3=USB 4=Network 5=RAM/initrd"
     script-branch {
         bp.console_string.wait-for $con "SOCFPGA_KM # "
-        $con.input "booti 0x82000000 0x90000000 0x88000000\r"
-        echo "=== booti issued — expect nproc=4 ==="
+        $con.input "bootmenu\r"
     }
     run
 }

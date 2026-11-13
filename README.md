@@ -48,10 +48,13 @@ Useful flags: `--force`, `--copy`, `--no-build`, `--scripts-only`, `--models-onl
 
 ```bash
 cd ~/km-hps && source ./set_simics_env_main.sh
-./scripts/stage-artifact.sh osbv --from http://alisubun1.sj.altera.com/share/KM --date latest
+./scripts/stage-artifact.sh osbv --from http://alisubun1.sj.altera.com/osbv-yo/KM --date latest
 ./scripts/run-osbv-smp.sh
 telnet 127.0.0.1 9123
 ```
+
+Build-host **collect/publish** scripts are also in this repo:
+`km-hps-files/scripts/artifacts/{collect,publish}-km-artifacts.sh`.
 
 See `km-hps-files/scripts/README.main-smp.md` for SMP/SVE details.
 

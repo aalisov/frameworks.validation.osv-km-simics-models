@@ -365,5 +365,5 @@ info "  Scripts: $PROJECT/scripts/  (stage-artifact, run-*-smp, fetch-km-artifac
 info "  Env:     source $PROJECT/set_simics_env_main.sh"
 info ""
 info "Stage OSBV from share:"
-info "  $PROJECT/scripts/stage-artifact.sh osbv --from http://HOST/share/KM --date latest"
+info "  $PROJECT/scripts/stage-artifact.sh osbv --from http://HOST/osbv-yo/KM --date latest"
 info "  $PROJECT/scripts/run-osbv-smp.sh"

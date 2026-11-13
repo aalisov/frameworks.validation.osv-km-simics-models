@@ -100,6 +100,26 @@ def km_simics_eth_host_fwd():
         print("ETH-fwd: connect-real-network-port-in FAILED: %s" % exc)
         print("ETH-fwd: cmd was: %s" % cmd)
         return False
+
+    # USBIP (guest usbipd / VUDC device mode) — host :USBIP_HOST_PORT → guest :3240
+    usbip_host_port = int(os.environ.get("USBIP_HOST_PORT", "3240"))
+    usbip_guest_port = int(os.environ.get("USBIP_GUEST_PORT", "3240"))
+    # First arg is target-port|service (do NOT also pass target-port=).
+    usbip_cmd = (
+        "connect-real-network-port-in %d ethernet-link = %s "
+        'host-port = %d target-ip = "%s" host-ip = "%s" -tcp -f'
+        % (usbip_guest_port, eth, usbip_host_port, ip, host_bind)
+    )
+    try:
+        simics.SIM_run_command(usbip_cmd)
+        print(
+            "ETH-fwd: usbip port-in OK — host :%d → guest %s:%d"
+            % (usbip_host_port, ip, usbip_guest_port)
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        print("ETH-fwd: usbip port-in FAILED: %s" % exc)
+        print("ETH-fwd: cmd was: %s" % usbip_cmd)
+        # SSH still works; do not fail the whole helper
     return True
 
 

@@ -19,8 +19,9 @@ cd ~/km-hps
 source ./set_simics_env_main.sh
 
 # Stage from HTTP/NFS share (or local collect path)
-./scripts/stage-artifact.sh osbv --from http://alisubun1.sj.altera.com/share/KM --date latest
-./scripts/stage-artifact.sh emul --from /var/www/html/share/KM --date latest
+./scripts/stage-artifact.sh osbv --from http://alisubun1.sj.altera.com/osbv-yo/KM --date latest
+./scripts/stage-artifact.sh osbv --from http://alisubun1.sj.altera.com/osbv-yo/KM/2026-11-12/osbv_sdmmc/
+./scripts/stage-artifact.sh emul --from /var/www/html/osbv-yo/KM --date latest
 # Same-host collect still works:
 # ./scripts/stage-artifact.sh osbv --deploy ~/WORK/KM/yocto/build/collected-binaries/osbv_sdmmc
 
@@ -45,6 +46,12 @@ source ./scripts/host/km-simics-ssh-publish.sh --auto --firewall
 ./scripts/run-osbv-smp-usb31-usbip.sh
 # guest: overlay + km-usb-gadget-setup.sh (no usbipd)
 # host:  ./scripts/host/km-usbip-attach.sh   # after bridge listens on :3240
+
+# VUDC → USBIP → host VHCI (SW path; no usb31 / no bridge model):
+#   docs/KM-SIMICS-USBIP-VUDC.md
+./scripts/run-osbv-smp.sh create_hps_eth0_network=TRUE uboot_menu=2
+# guest: setup-simics-eth.sh; modprobe usbip-vudc; km-usb-gadget-setup.sh; usbipd -e -D
+# host:  sudo usbip attach -r 127.0.0.1 -d usbip-vudc.0
 ```
 
 
@@ -57,18 +64,20 @@ Yocto build host and Simics host may differ. Publish writes only to a **local or
 ```bash
 ./scripts/artifacts/collect-km-artifacts.sh both
 ./scripts/artifacts/publish-km-artifacts.sh both \
-  --dest /var/www/html/share/KM --latest
+  --dest /var/www/html/osbv-yo/KM --latest
 ```
 
 **Simics host:**
 
 ```bash
 ./scripts/stage-artifact.sh osbv \
-  --from http://alisubun1.sj.altera.com/share/KM --date latest
+  --from http://alisubun1.sj.altera.com/osbv-yo/KM --date latest
+# or: --from http://alisubun1.sj.altera.com/osbv-yo/KM/2026-11-12/osbv_sdmmc/
 ./scripts/stage-artifact.sh emul \
-  --from /var/www/html/share/KM --date 2026-08-21
+  --from /var/www/html/osbv-yo/KM --date 2026-11-12
 source ./set_simics_env_main.sh && ./scripts/run-osbv-smp.sh
 ```
+
 
 Build host collect/publish: Yocto `scripts/artifacts/`. Simics scripts: this models repo.
 

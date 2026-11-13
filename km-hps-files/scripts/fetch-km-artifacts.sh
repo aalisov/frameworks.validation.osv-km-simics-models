@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
 # Fetch a published KM artifact drop via local/NFS path or HTTP.
 #
+# Share layout:  $ROOT/YYYY-MM-DD/{emul|osbv_sdmmc}/collected-files.txt
+#
+#   # share root + date
 #   ./scripts/fetch-km-artifacts.sh osbv \
-#     --from http://alisubun1.sj.altera.com/share/KM --date latest
-#   ./scripts/fetch-km-artifacts.sh emul \
-#     --from /var/www/html/share/KM --date 2026-08-21
+#     --from http://alisubun1.sj.altera.com/osbv-yo/KM --date 2026-11-12
+#   # share root + latest (newest YYYY-MM-DD that has this flavor)
+#   ./scripts/fetch-km-artifacts.sh osbv \
+#     --from http://alisubun1.sj.altera.com/osbv-yo/KM --date latest
+#   # direct drop (date+flavor already in URL — --date ignored)
+#   ./scripts/fetch-km-artifacts.sh osbv \
+#     --from http://alisubun1.sj.altera.com/osbv-yo/KM/2026-11-12/osbv_sdmmc/
 #
 # Prints the local cache directory on the last line: FETCHED=<path>
 set -euo pipefail
@@ -18,8 +25,12 @@ usage() {
   cat <<EOF
 Usage: $0 {emul|osbv|osbv_sdmmc} --from URL_OR_PATH [--date DATE|latest] [--out DIR]
 
-  --from   Share root: http(s)://host/share/KM  or  /mnt/share/KM
-  --date   YYYY-MM-DD or latest (default: latest)
+  --from   Share root, date dir, or direct drop:
+             http://host/osbv-yo/KM
+             http://host/osbv-yo/KM/2026-11-12
+             http://host/osbv-yo/KM/2026-11-12/osbv_sdmmc
+           (or local/NFS equivalent)
+  --date   YYYY-MM-DD or latest (default: latest). Ignored if --from is a direct drop.
   --out    Cache root (default: \$KM_ARTIFACT_CACHE or \$HOME/km-hps/cache/KM)
 EOF
   exit 1
@@ -60,40 +71,126 @@ is_http() {
   esac
 }
 
-resolve_date() {
-  local base="$1" want="$2"
-  if [[ "$want" != "latest" ]]; then
-    echo "$want"
-    return 0
-  fi
+http_ok() {
+  local url="$1" code
+  code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 20 -L "$url" 2>/dev/null || echo 000)"
+  [[ "$code" == "200" ]]
+}
+
+# Parse Apache/nginx autoindex HTML for YYYY-MM-DD/ entries (newest first).
+list_http_dates() {
+  local base="$1"
+  curl -fsSL --connect-timeout 5 --max-time 30 "$base/" 2>/dev/null \
+    | grep -oE 'href="[0-9]{4}-[0-9]{2}-[0-9]{2}/?"' \
+    | sed -E 's/href="//;s|/?"$||' \
+    | sort -ru
+}
+
+resolve_latest_date() {
+  local base="$1"
+  local d loc
+
   if is_http "$base"; then
-    # Follow redirect or parse latest symlink listing — try HEAD on latest/
+    # Prefer real latest/ symlink redirect if present.
     if command -v curl >/dev/null 2>&1; then
-      local loc
-      loc="$(curl -sI -L --max-redirs 0 "$base/latest/" 2>/dev/null | tr -d '\r' | awk 'tolower($1)=="location:"{print $2; exit}')" || true
+      loc="$(curl -sI -L --max-redirs 0 "$base/latest/" 2>/dev/null \
+        | tr -d '\r' | awk 'tolower($1)=="location:"{print $2; exit}')" || true
       if [[ -n "$loc" ]]; then
-        # Location may be absolute or relative ending in DATE/
-        basename "${loc%/}"
+        d="$(basename "${loc%/}")"
+        if [[ "$d" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+          echo "$d"
+          return 0
+        fi
+      fi
+      if http_ok "$base/latest/$SUB/collected-files.txt"; then
+        echo "latest"
         return 0
       fi
     fi
-    # Fallback: download latest/collected listing via curl of parent HTML is fragile —
-    # require explicit date if latest cannot be resolved over HTTP without following.
-    # Try fetching $base/latest/ as if it were a directory (Apache may serve it).
+    # No latest/ on share — pick newest dated drop that has this flavor.
+    while IFS= read -r d; do
+      [[ -n "$d" ]] || continue
+      if http_ok "$base/$d/$SUB/collected-files.txt"; then
+        echo "$d"
+        return 0
+      fi
+    done < <(list_http_dates "$base")
+    die "no dated $SUB drop under $base (no latest/ and no YYYY-MM-DD/$SUB)"
+  fi
+
+  if [[ -L "$base/latest" ]]; then
+    basename "$(readlink -f "$base/latest")"
+    return 0
+  fi
+  if [[ -d "$base/latest/$SUB" ]]; then
     echo "latest"
     return 0
-  else
-    if [[ -L "$base/latest" ]]; then
-      basename "$(readlink -f "$base/latest")"
-      return 0
-    fi
-    [[ -d "$base/latest" ]] && { echo "latest"; return 0; }
-    die "no latest symlink under $base"
   fi
+  # Local: newest dated directory with flavor
+  while IFS= read -r d; do
+    [[ -d "$base/$d/$SUB" ]] || continue
+    echo "$d"
+    return 0
+  done < <(find "$base" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' \
+            | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' | sort -ru)
+  die "no latest symlink / dated $SUB under $base"
 }
 
-RESOLVED_DATE="$(resolve_date "$FROM" "$DATE")"
-REMOTE_SUB="$FROM/$RESOLVED_DATE/$SUB"
+# Classify --from:
+#   direct  → already .../DATE/SUB  (or .../latest/SUB)
+#   dated   → .../DATE              (append /SUB)
+#   root    → share root            (append /DATE/SUB)
+classify_from() {
+  local base="$1"
+  local leaf parent_leaf
+  leaf="$(basename "$base")"
+  parent_leaf="$(basename "$(dirname "$base")")"
+
+  if [[ "$leaf" == "$SUB" || "$leaf" == "emul" || "$leaf" == "osbv_sdmmc" ]]; then
+    # If user pointed at wrong flavor leaf, still treat as direct but warn.
+    if [[ "$leaf" != "$SUB" ]]; then
+      die "--from ends in '$leaf' but flavor wants '$SUB'"
+    fi
+    echo "direct"
+    return 0
+  fi
+  if [[ "$leaf" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ || "$leaf" == "latest" ]]; then
+    echo "dated"
+    return 0
+  fi
+  echo "root"
+}
+
+FROM_KIND="$(classify_from "$FROM")"
+REMOTE_SUB=""
+RESOLVED_DATE=""
+
+case "$FROM_KIND" in
+  direct)
+    REMOTE_SUB="$FROM"
+    RESOLVED_DATE="$(basename "$(dirname "$FROM")")"
+    if [[ "$DATE" != "latest" && "$DATE" != "$RESOLVED_DATE" ]]; then
+      info "NOTE: --from is a direct drop ($RESOLVED_DATE); ignoring --date=$DATE"
+    fi
+    ;;
+  dated)
+    RESOLVED_DATE="$(basename "$FROM")"
+    if [[ "$DATE" != "latest" && "$DATE" != "$RESOLVED_DATE" ]]; then
+      info "NOTE: --from already has date $RESOLVED_DATE; ignoring --date=$DATE"
+    fi
+    REMOTE_SUB="$FROM/$SUB"
+    ;;
+  root)
+    if [[ "$DATE" == "latest" ]]; then
+      RESOLVED_DATE="$(resolve_latest_date "$FROM")"
+    else
+      [[ "$DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || die "bad --date: $DATE"
+      RESOLVED_DATE="$DATE"
+    fi
+    REMOTE_SUB="$FROM/$RESOLVED_DATE/$SUB"
+    ;;
+esac
+
 OUT_DIR="$OUT_ROOT/$RESOLVED_DATE/$SUB"
 mkdir -p "$OUT_DIR"
 
@@ -103,10 +200,12 @@ info "  out  = $OUT_DIR"
 
 if is_http "$FROM"; then
   command -v curl >/dev/null 2>&1 || die "curl required for HTTP fetch"
-  # Prefer collected-files.txt inventory
   local_list="$OUT_DIR/.fetch-list.txt"
   if ! curl -fsSL "$REMOTE_SUB/collected-files.txt" -o "$local_list"; then
-    die "cannot download $REMOTE_SUB/collected-files.txt"
+    die "cannot download $REMOTE_SUB/collected-files.txt
+hint: use share root + --date, e.g.
+  --from http://alisubun1.sj.altera.com/osbv-yo/KM --date 2026-11-12
+or a direct drop URL ending in /$SUB/"
   fi
   while IFS= read -r name; do
     [[ -n "$name" ]] || continue
@@ -120,7 +219,6 @@ if is_http "$FROM"; then
   curl -fsSL "$REMOTE_SUB/SHA256SUMS" -o "$OUT_DIR/SHA256SUMS" 2>/dev/null || true
 else
   [[ -d "$REMOTE_SUB" ]] || die "path missing: $REMOTE_SUB"
-  # Clear dest then copy
   find "$OUT_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
   if [[ -f "$REMOTE_SUB/collected-files.txt" ]]; then
     while IFS= read -r name; do

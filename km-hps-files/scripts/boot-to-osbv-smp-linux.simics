@@ -109,6 +109,27 @@ if (lookup-file $bl31_bin -query) {
 
 $sd_image_filename0 = $sd_image
 
+# Host USB MSC FAT (U-Boot usb.scr). Empty raw disks have no FAT — load
+# superfloppy images when present (override with usb3_*_image_filename=).
+if not defined usb3_hs_image_filename {
+    $usb3_hs_image_filename = $project_dir + "/images/usb/km-usb-fat-hs-256m.img"
+}
+if not defined usb3_image_filename {
+    $usb3_image_filename = $project_dir + "/images/usb/km-usb-fat-ss-128m.img"
+}
+if $usb3_hs_image_filename != "" {
+    if not (lookup-file $usb3_hs_image_filename -query) {
+        echo "WARNING: USB HS FAT image missing: %s (usb.scr needs FAT)" % $usb3_hs_image_filename
+        $usb3_hs_image_filename = ""
+    }
+}
+if $usb3_image_filename != "" {
+    if not (lookup-file $usb3_image_filename -query) {
+        echo "WARNING: USB SS FAT image missing: %s" % $usb3_image_filename
+        $usb3_image_filename = ""
+    }
+}
+
 run-command-file (sim->project + "/targets/km/agilex27-universal-fixed.simics")
 
 # Host SSH NAPT only when eth network was created (service-node + switch).

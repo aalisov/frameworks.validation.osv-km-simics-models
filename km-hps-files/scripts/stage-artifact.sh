@@ -19,8 +19,11 @@ Usage: $0 {emul|osbv} [--deploy DIR | --from URL_OR_PATH [--date DATE|latest]]
 
   emul | osbv     Which flavor to stage into \$KM_HPS/images/<flavor>
   --deploy DIR    Local source directory (collected-binaries or fetch cache)
-  --from URL|PATH Fetch from HTTP or local/NFS share root, then stage
-  --date DATE     With --from: YYYY-MM-DD or latest (default: latest)
+  --from URL|PATH Fetch then stage. Accepts share root, date dir, or
+                  direct drop (.../YYYY-MM-DD/osbv_sdmmc). Prefer
+                  http://alisubun1.sj.altera.com/osbv-yo/KM
+  --date DATE     With --from share root: YYYY-MM-DD or latest (default: latest).
+                  Ignored when --from is already a direct drop URL.
   --out DIR       Destination (default: \$KM_HPS/images/{emul|osbv})
   --initrd sve|nosve|both   emul initrd selection (default: both)
   --fix-initrd / --no-fix-initrd / --keep-initrd   emul initrd options

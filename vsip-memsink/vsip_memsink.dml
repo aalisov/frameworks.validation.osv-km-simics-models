@@ -1,4 +1,4 @@
-/*
+﻿/*
  * VSIP memory traffic checker (mem_sink) — functional Simics model.
  *
  * Register map matches supersmasher vsipmemsink.h / KM DT overlay:
@@ -6,6 +6,12 @@
  * H2F target window (vsip-memsink-tgt) is a separate mapped bank that
  * compares CPU/DMA traffic against the reference array when CONF_RUN
  * and CONF_ERROR are set (see thr-simple-cpu.c).
+ *
+ * Fix vs prior drop: dwcount MMIO reset. Device init() assigned the saved
+ * `dwcount` field to REF_DWS, but never called default() on dwcount_r, so
+ * phys_mem /dev/mem and HWAPI reads saw 0. Supersmasher thr-simple-cpu/dma
+ * never programs dwcount, so stock samples were empty-loop false PASS.
+ * Register-level init() now syncs soft value + saved field to REF_DWS.
  */
 
 dml 1.4;
@@ -128,12 +134,21 @@ bank control {
     register range_l_r @ 0x08 is (read, write) "Compare window base" {
         method write(uint64 val) { range_l = val; default(val); }
         method get() -> (uint64) { return range_l; }
+        method init() {
+            range_l = 0;
+            default(0);
+        }
     }
     register write_timeout_r @ 0x0c is (read, write) {
         method write(uint64 val) { write_timeout = val; default(val); }
         method get() -> (uint64) { return write_timeout; }
+        method init() {
+            write_timeout = 0;
+            default(0);
+        }
     }
     register dwcount_r @ 0x10 is (read, write) "Reference dword count" {
+        param init_val = REF_DWS;
         method write(uint64 val) {
             if (val > REF_DWS)
                 dwcount = REF_DWS;
@@ -142,6 +157,11 @@ bank control {
             default(dwcount);
         }
         method get() -> (uint64) { return dwcount; }
+        /* Sync soft register value with saved state (MMIO reads use this path). */
+        method init() {
+            dwcount = REF_DWS;
+            default(REF_DWS);
+        }
     }
     register unused0 @ 0x14 is (read, write) { method write(uint64 val) { default(val); } }
     register unused1 @ 0x18 is (read, write) { method write(uint64 val) { default(val); } }
@@ -154,6 +174,10 @@ bank control {
             default(val);
         }
         method get() -> (uint64) { return config_reg; }
+        method init() {
+            config_reg = 0;
+            default(0);
+        }
     }
 }
 

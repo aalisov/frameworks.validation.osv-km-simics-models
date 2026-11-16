@@ -163,7 +163,12 @@ install_scripts() {
       cp -a "$PROJECT/scripts/$base" "$PROJECT/scripts/${base}.bak.$(date +%Y%m%d%H%M%S)"
     fi
     cp -a "$f" "$PROJECT/scripts/$base"
-    [[ "$base" == *.sh ]] && chmod +x "$PROJECT/scripts/$base"
+    if [[ "$base" == *.sh ]]; then
+      chmod +x "$PROJECT/scripts/$base"
+    elif [[ -d "$PROJECT/scripts/$base" ]]; then
+      # Nested trees (e.g. km-ci/, host/): preserve + ensure executables
+      find "$PROJECT/scripts/$base" \( -name '*.sh' -o -name '*.py' \) -type f -exec chmod +x {} +
+    fi
     info "  + scripts/$base"
   done
 
@@ -361,9 +366,10 @@ fi
 info ""
 info "Done."
 info "  Models:  vsip_memsrc, vsip_memsink, p3t1755"
-info "  Scripts: $PROJECT/scripts/  (stage-artifact, run-*-smp, fetch-km-artifacts)"
+info "  Scripts: $PROJECT/scripts/  (stage-artifact, run-*-smp, fetch-km-artifacts, km-ci/)"
 info "  Env:     source $PROJECT/set_simics_env_main.sh"
 info ""
 info "Stage OSBV from share:"
 info "  $PROJECT/scripts/stage-artifact.sh osbv --from http://HOST/share/KM --date latest"
 info "  $PROJECT/scripts/run-osbv-smp.sh"
+info "Auto-test agent: $PROJECT/scripts/km-ci/README.md"

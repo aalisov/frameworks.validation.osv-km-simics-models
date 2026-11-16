@@ -1,0 +1,4 @@
+# KM CI: Ethernet presence (U-Boot). Do NOT ping here — PHY autoneg often
+# times out in U-Boot on this model ( eth.scr would false-fail ). Link/ping
+# is covered by Linux smoke (setup-simics-eth.sh + ping gw).
+mdio list

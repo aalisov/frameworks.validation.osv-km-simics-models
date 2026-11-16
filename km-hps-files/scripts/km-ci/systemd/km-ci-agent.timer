@@ -1,0 +1,12 @@
+[Unit]
+Description=Poll KM HTTP share for new osbv drops (every 20 min)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=20min
+AccuracySec=1min
+Persistent=true
+Unit=km-ci-agent.service
+
+[Install]
+WantedBy=timers.target

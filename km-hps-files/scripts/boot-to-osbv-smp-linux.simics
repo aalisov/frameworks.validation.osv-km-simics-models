@@ -62,7 +62,9 @@ $create_hps_sd_card = TRUE
 $create_hps_sd_card1 = FALSE
 $create_hps_mmc = FALSE
 $create_hps_mmc1 = FALSE
-$create_hps_eth0_network = FALSE
+# Do NOT force FALSE — CLI `create_hps_eth0_network=TRUE` must stick (else no
+# service-node / switch and guest ping to 10.10.0.1 is unreachable).
+if not defined create_hps_eth0_network { $create_hps_eth0_network = FALSE }
 $create_hps_apu_serial0_console = TRUE
 $create_hps_apu_serial1_console = FALSE
 $create_hps_apu_serial2_console = FALSE
@@ -103,6 +105,14 @@ $sd_image_filename0 = $sd_image
 
 run-command-file (sim->project + "/targets/km/agilex72-universal-fixed.simics")
 
+# Service-node / NAPT / real-time when eth was requested (same as usb31 runners).
+# Without this, guest ping to 10.10.0.1 often gets "Destination Host Unreachable".
+if $create_hps_eth0_network {
+    echo "Host eth forward (GUEST_ETH_IP default 10.10.0.100)"
+    @import os
+    @exec(open(os.environ.get("SIMICS_PROJECT", conf.sim.project) + "/scripts/km_simics_eth_host_fwd.py").read())
+}
+
 $hps = system.board.fpga.hps
 $con = $hps.lsp.console0.con
 $con.show
@@ -119,9 +129,17 @@ load-file $ssbl_image 0x82000000
 load-file $dtb_image 0x88000000
 
 if not defined stop_at_uboot { $stop_at_uboot = FALSE }
+# uboot_menu=TRUE: interrupt autoboot and run U-Boot bootmenu (QSPI/SD/USB/net)
+# instead of injecting host-side booti. Requires uboot.env with bootmenu_* on the WIC.
+if not defined uboot_menu { $uboot_menu = FALSE }
 
+# Do NOT send \r on "Hit any key…" — with bootmenu that is ENTER and selects QSPI
+# (empty NOR → UBI -28). Space stops the countdown; "0\r" picks menu Exit → prompt.
 script-branch {
-    bp.console_string.wait-then-write $con "Hit any key to stop autoboot" "\r"
+    bp.console_string.wait-then-write $con "Hit any key to stop autoboot" " "
+}
+script-branch {
+    bp.console_string.wait-then-write $con "Exit" "0\r"
 }
 script-branch {
     bp.console_string.wait-for $con "SOCFPGA_KM # "
@@ -132,9 +150,30 @@ run
 # After the stop above, the *script* continues immediately (sim is paused).
 # Must NOT fall through into booti when stopping for interactive U-Boot.
 if $stop_at_uboot {
-    echo "stop_at_uboot=TRUE — at U-Boot (no booti). Script ends here."
-    echo "  simics> run"
-    echo "  telnet 127.0.0.1 %d   → SOCFPGA_KM #  (usb start / usb tree)" % $console_telnet_port
+    # Same prep as Linux booti path: needed before CI `run boot_mmc` so SMP
+    # comes up (nproc=4). Without Cluster PPU ON, Linux often sees 1 CPU.
+    echo "Deassert KM OSPI combophy hard/soft reset (stop_at_uboot prep)"
+    @import os
+    @exec(open(os.environ.get("SIMICS_PROJECT", conf.sim.project) + "/scripts/km_ospi_combophy_deassert.py").read())
+    echo "Cluster PPU ON @ 0x08030000"
+    $hps.apu.phys_mem.write address = 0x08030000 value = 0x8 size = 4
+    echo "stop_at_uboot=TRUE — at U-Boot (no booti); resuming so UART telnet works."
+    echo "  telnet 127.0.0.1 %d   → SOCFPGA_KM #  (bootmenu / usb start / run boot_mmc)" % $console_telnet_port
+    echo "  Ctrl-C → simics> ; quit to exit"
+    # Background CI has no TTY: without this run, Simics hits simics>, gets stdin EOF,
+    # exits → next telnet connect is "Connection refused".
+    run
+} else if $uboot_menu {
+    echo "uboot_menu=TRUE — running U-Boot bootmenu (no host booti)"
+    @import os
+    @exec(open(os.environ.get("SIMICS_PROJECT", conf.sim.project) + "/scripts/km_ospi_combophy_deassert.py").read())
+    $hps.apu.phys_mem.write address = 0x08030000 value = 0x8 size = 4
+    script-branch {
+        bp.console_string.wait-for $con "SOCFPGA_KM # "
+        $con.input "bootmenu\r"
+        echo "=== bootmenu issued — pick 1=QSPI 2=SDMMC/eMMC 3=USB 4=Network ==="
+    }
+    run
 } else {
     load-file $kernel_image 0x82000000
 
@@ -149,16 +188,14 @@ if $stop_at_uboot {
     echo "Cluster PPU ON @ 0x08030000"
     $hps.apu.phys_mem.write address = 0x08030000 value = 0x8 size = 4
 
+    # Queue commands while sim is still stopped. Do NOT use parallel
+    # script-branches waiting on the same "SOCFPGA_KM # " — they both fire on
+    # the first (stale/shared) prompt and race printenv vs booti (CI saw booti
+    # stall mid-echo with no kernel).
     echo "Injecting bootargs + booti: %s" % $bootargs
     $con.input ("setenv bootargs " + $bootargs + "\r")
-    script-branch {
-        bp.console_string.wait-for $con "SOCFPGA_KM # "
-        $con.input "printenv bootargs\r"
-    }
-    script-branch {
-        bp.console_string.wait-for $con "SOCFPGA_KM # "
-        $con.input "booti 0x82000000 - 0x88000000\r"
-        echo "=== booti issued — expect nproc=4 ==="
-    }
+    $con.input "printenv bootargs\r"
+    $con.input "booti 0x82000000 - 0x88000000\r"
+    echo "=== booti queued — expect Linux login / nproc=4 ==="
     run
 }

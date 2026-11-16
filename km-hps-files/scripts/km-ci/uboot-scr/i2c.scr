@@ -1,0 +1,4 @@
+# KM CI: I2C bus probe
+i2c bus
+i2c dev 0
+i2c probe

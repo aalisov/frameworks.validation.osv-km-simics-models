@@ -1,0 +1,4 @@
+# KM CI: DT / FDT sanity (host loads DTB at 0x88000000 before U-Boot)
+fdt addr 0x88000000
+fdt print /model
+fdt list /

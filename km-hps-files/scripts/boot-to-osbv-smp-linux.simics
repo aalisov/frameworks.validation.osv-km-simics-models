@@ -163,8 +163,13 @@ if not defined uboot_menu { $uboot_menu = "" }
 @exec(open(os.environ.get("SIMICS_PROJECT", conf.sim.project) + "/scripts/km_uboot_menu_select.py").read())
 echo "=== Stage-1: U-Boot (mode=%s) ===" % $km_uboot_menu_mode
 
+# Do NOT send \r on "Hit any key…" — with bootmenu that is ENTER and selects QSPI
+# (empty NOR → UBI -28). Space stops the countdown; "0\r" picks menu Exit → prompt.
 script-branch {
-    bp.console_string.wait-then-write $con "Hit any key to stop autoboot" "\r"
+    bp.console_string.wait-then-write $con "Hit any key to stop autoboot" " "
+}
+script-branch {
+    bp.console_string.wait-then-write $con "Exit" "0\r"
 }
 script-branch {
     bp.console_string.wait-for $con "SOCFPGA_KM # "
@@ -187,8 +192,11 @@ $hps.apu.phys_mem.write address = 0x08030000 value = 0x8 size = 4
 $con.input ("setenv custom_bootargs " + $bootargs + "\r")
 
 if $km_uboot_menu_mode == "prompt" {
-    echo "stop_at_uboot=TRUE — paused at U-Boot prompt."
-    echo "  simics> run ; telnet 127.0.0.1 %d" % $console_telnet_port
+    # Background CI has no TTY: leave sim running so UART telnet stays up.
+    echo "stop_at_uboot=TRUE — at U-Boot prompt; resuming for UART telnet."
+    echo "  telnet 127.0.0.1 %d   → SOCFPGA_KM #  (bootmenu / usb start / run boot_mmc)" % $console_telnet_port
+    echo "  Ctrl-C → simics> ; quit to exit"
+    run
 } else if $km_uboot_menu_mode == "auto" {
     echo "Auto boot: %s" % $km_uboot_menu_cmd
     script-branch {

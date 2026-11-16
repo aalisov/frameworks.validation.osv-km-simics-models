@@ -1,0 +1,3 @@
+# KM CI: I3C — select by controller name (not numeric index)
+i3c i3c@9050000
+i3c device_list

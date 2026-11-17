@@ -1,0 +1,17 @@
+[Unit]
+Description=KM share-poll Simics auto-test agent (one-shot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Adjust User/WorkingDirectory if installing as system unit; user units inherit $HOME.
+WorkingDirectory=%h/km-hps
+Environment=KM_HPS=%h/km-hps
+Environment=SHARE_ROOT=http://alisubun1.sj.altera.com/osbv-yo/KM
+# Environment=KM_CI_SKIP_LONG=1
+ExecStart=%h/km-hps/scripts/km-ci/run-once.sh
+Nice=10
+
+[Install]
+WantedBy=default.target

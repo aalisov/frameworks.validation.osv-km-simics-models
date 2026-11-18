@@ -1,8 +1,9 @@
 /*
  * VSIP memory traffic generator (mem_source) — functional Simics model.
  *
- * Register map matches supersmasher vsipmemsrc.h / OSBV DT overlay layout:
- *   control @ +0x00000, vectors @ +0x10000, errors @ +0x20000
+ * Bank *contents* match supersmasher vsipmemsrc.h. Physical offsets are set
+ * by vsip_memsrc_comp.py (KM: control +0x0, errors +0x4000, vectors +0x8000
+ * inside vsip-memsrc@18180000 / 64 KiB). SM used +0x10000/+0x20000 / 256 KiB.
  *
  * AXI4 master (F2) behaviour is emulated via memory transactions on f2_mem.
  */

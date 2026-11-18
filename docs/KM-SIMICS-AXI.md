@@ -87,7 +87,7 @@ SOCAL window examples (`socal/km_hps/.../km_hps.h`):
 | SDRAM 2 GiB | `0x8000_0000` |
 | lwsoc2fpga 3 GiB | `0x1_0000_0000` |
 
-**OSBV VSIP note:** board hooks for memsrc/memsink append maps onto `fpga.hps.apu.phys_mem` and point memsrc’s F2 master at that same space — a **functional short-circuit**, not traffic through `mnoc_bridge.soc2fpga_port` stub RAMs.
+**OSBV VSIP note:** board hooks map memsrc/memsink MMIO onto `fpga.hps.apu.bt_mem` (Secure + `NS=1<<63` aliases) because cores use `cpu_mem → bt_mem → CCU`, not `phys_mem`. `phys_mem` still gets the same maps for debug and memsrc’s F2 master (DRAM carveout) — a **functional short-circuit**, not traffic through `rnoc_bridge.fabric_lwsoc2fpga` / `lwfpga_mem`.
 
 ## How devices attach
 

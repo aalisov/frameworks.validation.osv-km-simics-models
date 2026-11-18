@@ -1,4 +1,4 @@
-﻿/*
+/*
  * VSIP memory traffic checker (mem_sink) — functional Simics model.
  *
  * Register map matches supersmasher vsipmemsink.h / KM DT overlay:
@@ -8,10 +8,10 @@
  * and CONF_ERROR are set (see thr-simple-cpu.c).
  *
  * Fix vs prior drop: dwcount MMIO reset. Device init() assigned the saved
- * `dwcount` field to REF_DWS, but never called default() on dwcount_r, so
+ * `dwcount` field to REF_DWS, but never synced the soft register, so
  * phys_mem /dev/mem and HWAPI reads saw 0. Supersmasher thr-simple-cpu/dma
  * never programs dwcount, so stock samples were empty-loop false PASS.
- * Register-level init() now syncs soft value + saved field to REF_DWS.
+ * Register init() calls default() (DML 1.4, no args) with init_val=REF_DWS.
  */
 
 dml 1.4;
@@ -136,7 +136,7 @@ bank control {
         method get() -> (uint64) { return range_l; }
         method init() {
             range_l = 0;
-            default(0);
+            default(); /* DML 1.4: no args; soft value from init_val (0) */
         }
     }
     register write_timeout_r @ 0x0c is (read, write) {
@@ -144,7 +144,7 @@ bank control {
         method get() -> (uint64) { return write_timeout; }
         method init() {
             write_timeout = 0;
-            default(0);
+            default();
         }
     }
     register dwcount_r @ 0x10 is (read, write) "Reference dword count" {
@@ -157,10 +157,10 @@ bank control {
             default(dwcount);
         }
         method get() -> (uint64) { return dwcount; }
-        /* Sync soft register value with saved state (MMIO reads use this path). */
+        /* Sync soft register (.val from init_val) with saved state. */
         method init() {
             dwcount = REF_DWS;
-            default(REF_DWS);
+            default();
         }
     }
     register unused0 @ 0x14 is (read, write) { method write(uint64 val) { default(val); } }
@@ -176,7 +176,7 @@ bank control {
         method get() -> (uint64) { return config_reg; }
         method init() {
             config_reg = 0;
-            default(0);
+            default();
         }
     }
 }
@@ -235,6 +235,6 @@ method init() {
     write_timeout = 0;
     dwcount = REF_DWS;
     config_reg = 0;
-    tgt_base = 0xC0000000;
+    tgt_base = 0x40000000;
     clear_errors();
 }

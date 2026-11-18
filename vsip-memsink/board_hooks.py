@@ -20,11 +20,14 @@ from __future__ import annotations
 
 import simics
 
-DEFAULT_CTL_BASE = 0xF9040000
-DEFAULT_CTL_SIZE = 0x40000
-DEFAULT_TGT_BASE = 0xC0000000
+DEFAULT_CTL_BASE = 0x18190000
+DEFAULT_CTL_SIZE = 0x30000
+DEFAULT_TGT_BASE = 0x40000000
 DEFAULT_TGT_SIZE = 0x4000
 DEFAULT_SLOT = "vsip_memsink_0"
+
+# See vsip_memsrc.board_hooks: CPU path is bt_mem, not phys_mem.
+NS = 1 << 63
 
 
 def add_vsip_memsink(
@@ -46,6 +49,13 @@ def add_vsip_memsink(
     )
 
 
+def _append_s_ns(mem_space, base: int, obj, size: int) -> None:
+    new_map = list(mem_space.map or [])
+    new_map.append([base, obj, 0, 0, size])
+    new_map.append([base | NS, obj, 0, 0, size])
+    mem_space.map = new_map
+
+
 def wire_vsip_memsink(
     board,
     slot: str = DEFAULT_SLOT,
@@ -53,19 +63,23 @@ def wire_vsip_memsink(
     ctl_size: int = DEFAULT_CTL_SIZE,
     tgt_base: int = DEFAULT_TGT_BASE,
     tgt_size: int = DEFAULT_TGT_SIZE,
+    bt_mem_path: str = "fpga.hps.apu.bt_mem",
     phys_mem_path: str = "fpga.hps.apu.phys_mem",
 ) -> None:
-    """Map control MMIO and H2F target window into HPS phys_mem.
+    """Map ctl + tgt onto bt_mem (CPU) and phys_mem (debug).
 
-    Must run in post_instantiate (after phys_mem exists).
+    Must run in post_instantiate (after bt_mem / phys_mem exist).
     """
-    phys_mem = board.get_slot(phys_mem_path)
     vsip_mmio = board.get_slot(f"{slot}.mmio")
     vsip_tgt = board.get_slot(f"{slot}.tgt_space")
-    new_map = list(phys_mem.map)
-    new_map.append([ctl_base, vsip_mmio, 0, 0, ctl_size])
-    new_map.append([tgt_base, vsip_tgt, 0, 0, tgt_size])
-    phys_mem.map = new_map
+
+    bt_mem = board.get_slot(bt_mem_path)
+    _append_s_ns(bt_mem, ctl_base, vsip_mmio, ctl_size)
+    _append_s_ns(bt_mem, tgt_base, vsip_tgt, tgt_size)
+
+    phys_mem = board.get_slot(phys_mem_path)
+    _append_s_ns(phys_mem, ctl_base, vsip_mmio, ctl_size)
+    _append_s_ns(phys_mem, tgt_base, vsip_tgt, tgt_size)
 
     try:
         board.get_slot(f"{slot}.dev").tgt_base = tgt_base
@@ -82,5 +96,5 @@ def wire_vsip_memsink(
         board.obj,
         0,
         f"Mapped VSIP memsink ctl@0x{ctl_base:x}+0x{ctl_size:x} "
-        f"tgt@0x{tgt_base:x}+0x{tgt_size:x}",
+        f"tgt@0x{tgt_base:x}+0x{tgt_size:x} on {bt_mem_path} (+ phys_mem)",
     )

@@ -16,9 +16,13 @@ from __future__ import annotations
 
 import simics
 
-DEFAULT_BASE = 0xF9000000
-DEFAULT_SIZE = 0x40000
+DEFAULT_BASE = 0x18180000
+DEFAULT_SIZE = 0x10000
 DEFAULT_SLOT = "vsip_memsrc_0"
+
+# KM APU cores issue Non-Secure PAs with bit 63 set (see km_apu_constants.NS).
+# cpu_mem → bt_mem → CCU; phys_mem is debug/F2 only and is NOT on the core path.
+NS = 1 << 63
 
 
 def add_vsip_memsrc(board, slot: str = DEFAULT_SLOT, base: int = DEFAULT_BASE):
@@ -30,29 +34,43 @@ def add_vsip_memsrc(board, slot: str = DEFAULT_SLOT, base: int = DEFAULT_BASE):
     )
 
 
+def _append_s_ns(mem_space, base: int, obj, size: int) -> None:
+    """Map Secure and Non-Secure aliases for a PA window."""
+    new_map = list(mem_space.map or [])
+    new_map.append([base, obj, 0, 0, size])
+    new_map.append([base | NS, obj, 0, 0, size])
+    mem_space.map = new_map
+
+
 def wire_vsip_memsrc(
     board,
     slot: str = DEFAULT_SLOT,
     base: int = DEFAULT_BASE,
     size: int = DEFAULT_SIZE,
+    bt_mem_path: str = "fpga.hps.apu.bt_mem",
     phys_mem_path: str = "fpga.hps.apu.phys_mem",
 ) -> None:
-    """Map MMIO into HPS phys_mem and route F2 master to the same space.
+    """Map MMIO onto the CPU path (bt_mem) and keep phys_mem for F2/debug.
 
-    Must run in post_instantiate (after phys_mem exists). F2 must see absolute
-    PAs used by supersmasher vecscripts (e.g. DRAM carveout @ 0xf0000000).
+    Must run in post_instantiate. Core accesses use cpu_mem→bt_mem→CCU; a
+    phys_mem-only map never sees Linux/supersmasher stores (fault PA looks like
+    0x80000000_18188000 = NS|vectors).
     """
-    phys_mem = board.get_slot(phys_mem_path)
     vsip_mmio = board.get_slot(f"{slot}.mmio")
-    new_map = list(phys_mem.map)
-    new_map.append([base, vsip_mmio, 0, 0, size])
-    phys_mem.map = new_map
+
+    bt_mem = board.get_slot(bt_mem_path)
+    _append_s_ns(bt_mem, base, vsip_mmio, size)
     simics.SIM_log_info(
         3,
         board.obj,
         0,
-        f"Mapped VSIP memsrc MMIO at 0x{base:x} (size 0x{size:x})",
+        f"Mapped VSIP memsrc MMIO on {bt_mem_path} at 0x{base:x}/NS "
+        f"(size 0x{size:x})",
     )
+
+    # Debug get/set + optional alias; F2 master still needs phys_mem for DRAM.
+    phys_mem = board.get_slot(phys_mem_path)
+    _append_s_ns(phys_mem, base, vsip_mmio, size)
 
     try:
         board.get_slot(f"{slot}.dev").f2_mem = phys_mem

@@ -17,10 +17,10 @@ class vsip_memsink_comp(StandardConnectorComponent):
     class basename(StandardConnectorComponent.basename):
         val = "vsip_memsink"
 
-    class base_addr(SimpleConfigAttribute(0xF9040000, "i", simics.Sim_Attr_Optional)):
+    class base_addr(SimpleConfigAttribute(0x18190000, "i", simics.Sim_Attr_Optional)):
         """CPU-visible control base (OSBV DT: vsip-memsink-ctl@F9040000)."""
 
-    class target_addr(SimpleConfigAttribute(0xC0000000, "i", simics.Sim_Attr_Optional)):
+    class target_addr(SimpleConfigAttribute(0x40000000, "i", simics.Sim_Attr_Optional)):
         """H2F target window base (OSBV DT: vsip-memsink-tgt@C0000000)."""
 
     class target_size(SimpleConfigAttribute(0x4000, "i", simics.Sim_Attr_Optional)):

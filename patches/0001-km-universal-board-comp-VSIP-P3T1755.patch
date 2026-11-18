@@ -16,12 +16,12 @@
 +    class create_vsip_memsrc(
 +        SimpleConfigAttribute(True, "b", simics.Sim_Attr_Optional)
 +    ):
-+        """Instantiate VSIP mem_source model at 0xF9000000 (OSBV DT overlay)."""
++        """Instantiate VSIP mem_source model at 0x18180000 (KM DT overlay)."""
 +
 +    class vsip_memsrc_base(
-+        SimpleConfigAttribute(0xF9000000, "i", simics.Sim_Attr_Optional)
++        SimpleConfigAttribute(0x18180000, "i", simics.Sim_Attr_Optional)
 +    ):
-+        """Base address for VSIP mem_source MMIO."""
++        """Base address for VSIP mem_source MMIO (KM LWSOC2NOC)."""
 +
      ########################################################################
      # Component methods
@@ -71,35 +71,10 @@
 +
 +    class component(StandardComponent.component):
 +        def post_instantiate(self):
++            # CPU path is cpu_mem→bt_mem→CCU (NS bit 63). phys_mem-only maps
++            # never see supersmasher stores (fault @ 0x80000000_1818xxxx).
 +            if not self._up.create_vsip_memsrc.val:
 +                return
-+            phys_mem = self._up.get_slot("fpga.hps.apu.phys_mem")
-+            vsip_mmio = self._up.get_slot("vsip_memsrc_0.mmio")
-+            base = self._up.vsip_memsrc_base.val
-+            size = 0x40000
-+            new_map = list(phys_mem.map)
-+            new_map.append([base, vsip_mmio, 0, 0, size])
-+            phys_mem.map = new_map
-+            simics.SIM_log_info(
-+                3,
-+                self._up.obj,
-+                0,
-+                f"Mapped VSIP memsrc MMIO at 0x{base:x} (size 0x{size:x})",
-+            )
-+            # F2 AXI master must see the same PA map as the CPU (DRAM carveout
-+            # at 0xf0000000+, etc.). A private stub RAM only covers 0..size.
-+            try:
-+                self._up.get_slot("vsip_memsrc_0.dev").f2_mem = phys_mem
-+                simics.SIM_log_info(
-+                    3,
-+                    self._up.obj,
-+                    0,
-+                    "Routed VSIP memsrc F2 master to hps.apu.phys_mem",
-+                )
-+            except Exception as exc:  # pylint: disable=broad-except
-+                simics.SIM_log_info(
-+                    1,
-+                    self._up.obj,
-+                    0,
-+                    f"VSIP F2→phys_mem wire failed: {exc}",
-+                )
++            from simmod.vsip_memsrc.board_hooks import wire_vsip_memsrc
++
++            wire_vsip_memsrc(self._up, base=self._up.vsip_memsrc_base.val)

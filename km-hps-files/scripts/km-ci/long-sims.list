@@ -1,0 +1,7 @@
+# KM long-sim catalog (concept v2).
+# Columns: id  instance  telnet  guest_eth  script  [args...]
+# Select which IDs to launch with KM_CI_LONG_SCRIPTS (comma list; default = all below).
+# Script is a basename under $KM_HPS/scripts/.
+A  0  9123  0  run-osbv-smp.sh              create_hps_eth0_network=TRUE stop_at_uboot=TRUE
+B  1  9124  1  run-osbv-smp.sh              create_hps_eth0_network=TRUE
+C  2  9125  1  run-osbv-smp-usb31-usbip.sh  create_hps_eth0_network=TRUE

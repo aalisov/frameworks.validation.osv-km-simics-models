@@ -17,12 +17,17 @@
 #   KM_SIMICS_RUNS_URL='http://alisubun1.sj.altera.com/osbv-yo/KM/simics-runs/' \
 #     ./scripts/host/km-simics-instances-publish.sh --publish
 #
+# Git push (alisubun1 post-receive → webdata):
+#   KM_SIMICS_RUNS_GIT='alisov@alisubun1:git/km-simics-runs.git' \
+#     ./scripts/host/km-simics-instances-publish.sh --publish
+#
 # Cron / after long-sims:
 #   */5 * * * *  KM_SIMICS_RUNS_DEST=... $HOME/km-hps/scripts/host/km-simics-instances-publish.sh --publish
 #
 # Env:
 #   KM_SIMICS_RUNS_OUT   local work dir (default: $KM_HPS/var/simics-runs)
-#   KM_SIMICS_RUNS_DEST  rsync/scp/cp target dir (required for --publish)
+#   KM_SIMICS_RUNS_DEST  rsync/scp/cp target dir
+#   KM_SIMICS_RUNS_GIT   bare-repo URL (git push; preferred for remote Apache)
 #   KM_SIMICS_RUNS_URL   optional public URL printed in the page footer
 #   KM_SIMICS_RUNS_HOST  display hostname (default: fqdn)
 #   KM_SIMICS_RUNS_LAN   LAN IP shown in ssh hints (default: default-route IPv4)
@@ -32,15 +37,20 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091
 source "$ROOT/scripts/host/km-simics-instances.sh"
+if [[ -f "$ROOT/scripts/km-ci/config.env" ]]; then
+  # shellcheck disable=SC1091
+  source "$ROOT/scripts/km-ci/config.env"
+fi
 
 OUT="${KM_SIMICS_RUNS_OUT:-${KM_SIMICS_STATUS_OUT:-$ROOT/var/simics-runs}}"
-DEST="${KM_SIMICS_RUNS_DEST:-${KM_SIMICS_STATUS_DEST:-}}"
-URL="${KM_SIMICS_RUNS_URL:-${KM_SIMICS_STATUS_URL:-http://alisubun1.sj.altera.com/osbv-yo/KM/simics-runs/}}"
+DEST="${KM_SIMICS_RUNS_DEST:-}"
+GIT_REMOTE="${KM_SIMICS_RUNS_GIT:-${KM_SIMICS_WEB_GIT:-}}"
+URL="${KM_SIMICS_RUNS_URL:-https://altera-sandbox.github.io/frameworks.validation.osv-auto.km-simics-web/simics-runs/}"
 HOST_DISP="${KM_SIMICS_RUNS_HOST:-${KM_SIMICS_STATUS_HOST:-$(hostname -f 2>/dev/null || hostname)}}"
 DO_PUBLISH=0
 
 usage() {
-  sed -n '2,32p' "$0" | sed 's/^# \?//'
+  sed -n '2,40p' "$0" | sed 's/^# \?//'
   exit 0
 }
 
@@ -49,6 +59,7 @@ while [[ $# -gt 0 ]]; do
     --publish) DO_PUBLISH=1; shift ;;
     --out) OUT="${2:?}"; shift 2 ;;
     --dest) DEST="${2:?}"; shift 2 ;;
+    --git) GIT_REMOTE="${2:?}"; shift 2 ;;
     --url) URL="${2:?}"; shift 2 ;;
     -h|--help) usage ;;
     *) echo "unknown arg: $1" >&2; usage ;;
@@ -228,27 +239,36 @@ echo "  $JSON"
 echo "  $TXT"
 
 if [[ $DO_PUBLISH -eq 1 ]]; then
-  [[ -n "$DEST" ]] || {
-    echo "ERROR: --publish needs KM_SIMICS_RUNS_DEST or --dest (e.g. alisov@alisubun1:/DISK1/nfs/webdata/osbv-yo/KM/simics-runs)" >&2
+  published=0
+  if [[ -n "$GIT_REMOTE" ]]; then
+    "$ROOT/scripts/km-ci/git-web-publish.sh" "$OUT" "$GIT_REMOTE" runs
+    echo "Published (git) → $GIT_REMOTE (simics-runs/)"
+    published=1
+  fi
+  if [[ -n "$DEST" ]]; then
+    case "$DEST" in
+      *:*)
+        if command -v rsync >/dev/null 2>&1; then
+          rsync -az --delete "$OUT"/ "$DEST"/
+        else
+          scp -q "$HTML" "$JSON" "$TXT" "$DEST"/
+        fi
+        ;;
+      *)
+        mkdir -p "$DEST"
+        if command -v rsync >/dev/null 2>&1; then
+          rsync -a --delete "$OUT"/ "$DEST"/
+        else
+          cp -a "$HTML" "$JSON" "$TXT" "$DEST"/
+        fi
+        ;;
+    esac
+    echo "Published → $DEST"
+    published=1
+  fi
+  if [[ $published -eq 0 ]]; then
+    echo "ERROR: --publish needs KM_SIMICS_WEB_GIT / KM_SIMICS_RUNS_GIT and/or KM_SIMICS_RUNS_DEST" >&2
     exit 1
-  }
-  case "$DEST" in
-    *:*)
-      if command -v rsync >/dev/null 2>&1; then
-        rsync -az --delete "$OUT"/ "$DEST"/
-      else
-        scp -q "$HTML" "$JSON" "$TXT" "$DEST"/
-      fi
-      ;;
-    *)
-      mkdir -p "$DEST"
-      if command -v rsync >/dev/null 2>&1; then
-        rsync -a --delete "$OUT"/ "$DEST"/
-      else
-        cp -a "$HTML" "$JSON" "$TXT" "$DEST"/
-      fi
-      ;;
-  esac
-  echo "Published → $DEST"
+  fi
   [[ -n "$URL" ]] && echo "URL: $URL"
 fi

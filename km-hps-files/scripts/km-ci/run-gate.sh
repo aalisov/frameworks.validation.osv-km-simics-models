@@ -3,7 +3,7 @@
 # Default: fatload mmc ${mmcdev}:1 ${scriptaddr} km-tests/<name>.scr && source ${scriptaddr}
 # Host-side booti is intentionally NOT used (stalls mid-echo in CI).
 #
-# Exit 0 = all PASS; non-zero = FAIL (long sims must not launch).
+# Exit 0 = PASS, 1 = FAIL (suite done; long sims OK), 2 = BLOCKED (skip long sims).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -67,9 +67,25 @@ GATE_PID=$!
 log "gate Simics PID=$GATE_PID"
 sleep 3
 if ! kill -0 "$GATE_PID" 2>/dev/null; then
-  log "ERROR: gate Simics exited early — see $SIMICS_LOG"
+  log "ERROR: gate Simics exited early — BLOCKED — see $SIMICS_LOG"
   tail -40 "$SIMICS_LOG" >&2 || true
-  exit 1
+  mkdir -p "$KM_CI_VAR"
+  printf 'BLOCKED\n' >"$KM_CI_VAR/last-gate-overall.txt"
+  {
+    echo "# KM gate SUMMARY — $PUBLISH_DATE"
+    echo
+    echo "- Overall: **BLOCKED** (Simics exited before U-Boot prompt)"
+    echo "- Artifacts: \`$RESULT_DIR\`"
+  } >"$SUMMARY_MD"
+  printf '%s\n' "$SUMMARY_MD" >"$KM_CI_VAR/last-gate-summary.txt"
+  if [[ "${KM_CI_PUBLISH_WEB:-1}" == "1" ]]; then
+    PUBLISH_ARGS=()
+    if [[ -n "${KM_SIMICS_WEB_GIT:-}${KM_SIMICS_STATUS_GIT:-}${KM_SIMICS_STATUS_DEST:-}" ]]; then
+      PUBLISH_ARGS+=(--publish)
+    fi
+    "$SCRIPT_DIR/publish-gate-status.sh" "${PUBLISH_ARGS[@]}" || true
+  fi
+  exit 2
 fi
 
 log "gate-session: U-Boot ${SCR_MODE} scrs + run boot_mmc + Linux smoke"
@@ -80,6 +96,7 @@ GATE_ARGS=(
   gate-session
   --scr-mode "$SCR_MODE"
   --scrs "$SCRS_CSV"
+  --nonblocking-scrs "${KM_CI_UBOOT_NONBLOCKING_SCRS:-*}"
   --fat-dir "${KM_CI_UBOOT_FAT_DIR}"
   --mmc-spec "${KM_CI_UBOOT_MMC_SPEC}"
   --scriptaddr "${KM_CI_UBOOT_SCRIPTADDR}"
@@ -96,6 +113,11 @@ GATE_ARGS=(
   --eth
   --results-json "$SESSION_JSON"
 )
+if [[ "${KM_CI_LINUX_NONBLOCKING:-1}" == "1" ]]; then
+  GATE_ARGS+=(--linux-nonblocking)
+else
+  GATE_ARGS+=(--linux-blocking)
+fi
 if [[ "$SCR_MODE" == "paste" ]]; then
   GATE_ARGS+=(--scr-dir "$SCR_DIR")
 fi
@@ -115,9 +137,13 @@ if Path(session_path).is_file():
     d = json.loads(Path(session_path).read_text(encoding="utf-8"))
 uboot = d.get("uboot") or {s: "FAIL" for s in scrs}
 linux = d.get("linux_smoke", "FAIL")
-overall = d.get("overall", "FAIL")
-if rc != "0":
-    overall = "FAIL"
+prompt = d.get("uboot_prompt", "FAIL")
+overall = d.get("overall", "BLOCKED")
+# Align with expect exit: 0=PASS, 1=FAIL, 2=BLOCKED
+if rc == "2" or (prompt != "PASS" and overall not in ("PASS", "FAIL")):
+    overall = "BLOCKED"
+elif overall not in ("PASS", "FAIL", "BLOCKED"):
+    overall = "FAIL" if rc != "0" else "PASS"
 host = socket.getfqdn()
 when = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
 how = (
@@ -125,10 +151,16 @@ how = (
     if scr_mode == "fatload"
     else "host paste uboot-scr/<scr>"
 )
+policy = (
+    "PASS = all checks ok; FAIL = suite done with failures (long sims still launch); "
+    "BLOCKED = incomplete (no U-Boot prompt) — skip long sims"
+)
 lines = [
     f"# KM gate SUMMARY — {pub}",
     "",
     f"- Overall: **{overall}**",
+    f"- Policy: {policy}",
+    f"- U-Boot prompt: **{prompt}**",
     f"- Share: `{share}`",
     f"- Host: {host}",
     f"- When: {when}",
@@ -158,6 +190,8 @@ lines += [
 Path(md_path).write_text("\n".join(lines), encoding="utf-8")
 out = {
     "overall": overall,
+    "uboot_prompt": prompt,
+    "pass_policy": d.get("pass_policy", "pass_fail_blocked"),
     "date": pub,
     "share": share,
     "when": when,
@@ -173,9 +207,14 @@ PY
 
 log "SUMMARY → $SUMMARY_MD ($OVERALL)"
 
+# Persist for run-once / notify
+mkdir -p "$KM_CI_VAR"
+printf '%s\n' "$OVERALL" >"$KM_CI_VAR/last-gate-overall.txt"
+printf '%s\n' "$SUMMARY_MD" >"$KM_CI_VAR/last-gate-summary.txt"
+
 if [[ "${KM_CI_PUBLISH_WEB:-1}" == "1" ]]; then
   PUBLISH_ARGS=()
-  if [[ -n "${KM_SIMICS_STATUS_DEST:-}" ]]; then
+  if [[ -n "${KM_SIMICS_WEB_GIT:-}${KM_SIMICS_STATUS_GIT:-}${KM_SIMICS_STATUS_DEST:-}" ]]; then
     PUBLISH_ARGS+=(--publish)
   fi
   "$SCRIPT_DIR/publish-gate-status.sh" "${PUBLISH_ARGS[@]}" || \
@@ -185,4 +224,9 @@ fi
 cleanup_gate_sim
 trap - EXIT
 
-[[ "$OVERALL" == "PASS" ]]
+case "$OVERALL" in
+  PASS) exit 0 ;;
+  FAIL) exit 1 ;;
+  BLOCKED) exit 2 ;;
+  *) exit 2 ;;
+esac

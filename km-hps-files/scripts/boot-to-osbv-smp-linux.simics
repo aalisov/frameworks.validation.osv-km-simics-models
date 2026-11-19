@@ -5,10 +5,7 @@
 # Requires: source ~/km-hps/set_simics_env_main.sh
 # FIT should embed bl31-sve (ATF_SVE_DEFAULT=sve). No arm64.nosve.
 #
-#   ./scripts/run-osbv-smp.sh                 # interactive U-Boot bootmenu
-#   ./scripts/run-osbv-smp.sh uboot_menu=2    # auto SDMMC → Linux
-#   ./scripts/run-osbv-smp.sh uboot_menu=5    # RAM/initrd (needs Image+initrd in DRAM)
-#   ./scripts/run-osbv-smp.sh stop_at_uboot=TRUE
+#   ./scripts/run-osbv-smp.sh
 #   telnet 127.0.0.1 9123
 # =============================================================================
 
@@ -65,12 +62,9 @@ $create_hps_sd_card = TRUE
 $create_hps_sd_card1 = FALSE
 $create_hps_mmc = FALSE
 $create_hps_mmc1 = FALSE
-# Default OFF: gmac1+MDIO TX can wedge Simics (NETDEV WATCHDOG). Opt-in:
-#   ./scripts/run-osbv-smp.sh create_hps_eth0_network=TRUE
-# then guest: setup-simics-eth.sh  (10.10.0.100 ↔ service-node 10.10.0.1)
-if not defined create_hps_eth0_network {
-    $create_hps_eth0_network = FALSE
-}
+# Do NOT force FALSE — CLI `create_hps_eth0_network=TRUE` must stick (else no
+# service-node / switch and guest ping to 10.10.0.1 is unreachable).
+if not defined create_hps_eth0_network { $create_hps_eth0_network = FALSE }
 $create_hps_apu_serial0_console = TRUE
 $create_hps_apu_serial1_console = FALSE
 $create_hps_apu_serial2_console = FALSE
@@ -109,37 +103,18 @@ if (lookup-file $bl31_bin -query) {
 
 $sd_image_filename0 = $sd_image
 
-# Host USB MSC FAT (U-Boot usb.scr). Empty raw disks have no FAT — load
-# superfloppy images when present (override with usb3_*_image_filename=).
-if not defined usb3_hs_image_filename {
-    $usb3_hs_image_filename = $project_dir + "/images/usb/km-usb-fat-hs-256m.img"
-}
-if not defined usb3_image_filename {
-    $usb3_image_filename = $project_dir + "/images/usb/km-usb-fat-ss-128m.img"
-}
-if $usb3_hs_image_filename != "" {
-    if not (lookup-file $usb3_hs_image_filename -query) {
-        echo "WARNING: USB HS FAT image missing: %s (usb.scr needs FAT)" % $usb3_hs_image_filename
-        $usb3_hs_image_filename = ""
-    }
-}
-if $usb3_image_filename != "" {
-    if not (lookup-file $usb3_image_filename -query) {
-        echo "WARNING: USB SS FAT image missing: %s" % $usb3_image_filename
-        $usb3_image_filename = ""
-    }
-}
+run-command-file (sim->project + "/targets/km/agilex72-universal-fixed.simics")
 
-run-command-file (sim->project + "/targets/km/agilex27-universal-fixed.simics")
+# CI: auto-continue + clear I2C if "Device in Reset" critical would drop to simics>
+@import os
+@exec(open(os.environ.get("SIMICS_PROJECT", conf.sim.project) + "/scripts/km_continue_on_device_in_reset.py").read())
 
-# Host SSH NAPT only when eth network was created (service-node + switch).
+# Service-node / NAPT / real-time when eth was requested (same as usb31 runners).
+# Without this, guest ping to 10.10.0.1 often gets "Destination Host Unreachable".
 if $create_hps_eth0_network {
-    echo "Host eth forward (GUEST_ETH_IP default 10.10.0.100) — TX may hang sim"
+    echo "Host eth forward (GUEST_ETH_IP default 10.10.0.100)"
     @import os
     @exec(open(os.environ.get("SIMICS_PROJECT", conf.sim.project) + "/scripts/km_simics_eth_host_fwd.py").read())
-} else {
-    echo "Eth network OFF (default). Console: telnet 127.0.0.1 (console_telnet_port)"
-    echo "  Opt-in: create_hps_eth0_network=TRUE then guest setup-simics-eth.sh"
 }
 
 $hps = system.board.fpga.hps
@@ -154,14 +129,13 @@ $hps.apu.phys_mem.load-file $spl_bin 0x0
 psel $hps.apu.mpu.cores[0]
 penable
 enable-debugger
-$hps.apu.phys_mem.load-file $ssbl_image 0x82000000
-$hps.apu.phys_mem.load-file $dtb_image 0x88000000
+load-file $ssbl_image 0x82000000
+load-file $dtb_image 0x88000000
 
 if not defined stop_at_uboot { $stop_at_uboot = FALSE }
-if not defined uboot_menu { $uboot_menu = "" }
-@import os
-@exec(open(os.environ.get("SIMICS_PROJECT", conf.sim.project) + "/scripts/km_uboot_menu_select.py").read())
-echo "=== Stage-1: U-Boot (mode=%s) ===" % $km_uboot_menu_mode
+# uboot_menu=TRUE: interrupt autoboot and run U-Boot bootmenu (QSPI/SD/USB/net)
+# instead of injecting host-side booti. Requires uboot.env with bootmenu_* on the WIC.
+if not defined uboot_menu { $uboot_menu = FALSE }
 
 # Do NOT send \r on "Hit any key…" — with bootmenu that is ENTER and selects QSPI
 # (empty NOR → UBI -28). Space stops the countdown; "0\r" picks menu Exit → prompt.
@@ -177,40 +151,51 @@ script-branch {
 }
 run
 
-# After U-Boot is running, backdoor Image for optional bootmenu item 5 (RAM).
-$hps.apu.phys_mem.load-file $kernel_image 0x82000000
-
-# KM HPS OSPI / Cadence xSPI: combophy aux MMIO is blocked while
-# ospi_combophy0.bank.combophy_bank is held in reset (Simics critical).
-echo "Deassert KM OSPI combophy hard/soft reset"
-@import os
-@exec(open(os.environ.get("SIMICS_PROJECT", conf.sim.project) + "/scripts/km_ospi_combophy_deassert.py").read())
-
-echo "Cluster PPU ON @ 0x08030000"
-$hps.apu.phys_mem.write address = 0x08030000 value = 0x8 size = 4
-
-$con.input ("setenv custom_bootargs " + $bootargs + "\r")
-
-if $km_uboot_menu_mode == "prompt" {
-    # Background CI has no TTY: leave sim running so UART telnet stays up.
-    echo "stop_at_uboot=TRUE — at U-Boot prompt; resuming for UART telnet."
+# After the stop above, the *script* continues immediately (sim is paused).
+# Must NOT fall through into booti when stopping for interactive U-Boot.
+if $stop_at_uboot {
+    # Same prep as Linux booti path: needed before CI `run boot_mmc` so SMP
+    # comes up (nproc=4). Without Cluster PPU ON, Linux often sees 1 CPU.
+    echo "Deassert KM OSPI combophy hard/soft reset (stop_at_uboot prep)"
+    @import os
+    @exec(open(os.environ.get("SIMICS_PROJECT", conf.sim.project) + "/scripts/km_ospi_combophy_deassert.py").read())
+    echo "Deassert KM HPS I2C (avoid Device-in-Reset critical on Linux probe)"
+    @exec(open(os.environ.get("SIMICS_PROJECT", conf.sim.project) + "/scripts/km_hps_i2c_deassert.py").read())
+    echo "Cluster PPU ON @ 0x08030000"
+    $hps.apu.phys_mem.write address = 0x08030000 value = 0x8 size = 4
+    echo "stop_at_uboot=TRUE — at U-Boot (no booti); resuming so UART telnet works."
     echo "  telnet 127.0.0.1 %d   → SOCFPGA_KM #  (bootmenu / usb start / run boot_mmc)" % $console_telnet_port
     echo "  Ctrl-C → simics> ; quit to exit"
+    # Background CI has no TTY: without this run, Simics hits simics>, gets stdin EOF,
+    # exits → next telnet connect is "Connection refused".
     run
-} else if $km_uboot_menu_mode == "auto" {
-    echo "Auto boot: %s" % $km_uboot_menu_cmd
-    script-branch {
-        bp.console_string.wait-for $con "SOCFPGA_KM # "
-        $con.input ($km_uboot_menu_cmd + "\r")
-        echo "=== %s issued ===" % $km_uboot_menu_cmd
-    }
-    run
-} else {
-    echo "Interactive bootmenu — telnet 127.0.0.1 %d" % $console_telnet_port
-    echo "  1=QSPI 2=SDMMC 3=USB 4=Network 5=RAM/initrd"
+} else if $uboot_menu {
+    echo "uboot_menu=TRUE — running U-Boot bootmenu (no host booti)"
+    @import os
+    @exec(open(os.environ.get("SIMICS_PROJECT", conf.sim.project) + "/scripts/km_ospi_combophy_deassert.py").read())
+    @exec(open(os.environ.get("SIMICS_PROJECT", conf.sim.project) + "/scripts/km_hps_i2c_deassert.py").read())
+    $hps.apu.phys_mem.write address = 0x08030000 value = 0x8 size = 4
     script-branch {
         bp.console_string.wait-for $con "SOCFPGA_KM # "
         $con.input "bootmenu\r"
+        echo "=== bootmenu issued — pick 1=QSPI 2=SDMMC/eMMC 3=USB 4=Network ==="
     }
+    run
+} else {
+    # Boot Linux via U-Boot `run boot_mmc` (FAT Image+DTB). Host-side booti is
+    # fragile on this UART path (truncated `booti … - 0x88000000` → FDT=0 →
+    # "FDT and ATAGS support not compiled in" / Please RESET).
+    echo "Deassert KM OSPI combophy hard/soft reset"
+    @import os
+    @exec(open(os.environ.get("SIMICS_PROJECT", conf.sim.project) + "/scripts/km_ospi_combophy_deassert.py").read())
+    echo "Deassert KM HPS I2C (avoid Device-in-Reset critical on Linux probe)"
+    @exec(open(os.environ.get("SIMICS_PROJECT", conf.sim.project) + "/scripts/km_hps_i2c_deassert.py").read())
+
+    echo "Cluster PPU ON @ 0x08030000"
+    $hps.apu.phys_mem.write address = 0x08030000 value = 0x8 size = 4
+
+    echo "Issuing: run boot_mmc (SDMMC Linux)"
+    $con.input "run boot_mmc\r"
+    echo "=== boot_mmc queued — expect Linux login / nproc=4 ==="
     run
 }

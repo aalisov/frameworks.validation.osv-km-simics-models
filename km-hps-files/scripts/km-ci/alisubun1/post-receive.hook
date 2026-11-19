@@ -1,0 +1,38 @@
+#!/bin/bash
+# Install as:  <bare-repo>/hooks/post-receive
+# Checks out into a private work tree, then rsyncs into Apache webdata.
+# Requires write access to KM_WEB_TARGET (alisov in www-data + g+w, or chown).
+set -euo pipefail
+
+TARGET="${KM_WEB_TARGET:?KM_WEB_TARGET not set in hook}"
+DEFAULT_BRANCH="${KM_WEB_BRANCH:-main}"
+WORK="${KM_WEB_WORK:?KM_WEB_WORK not set in hook}"
+GITDIR="${GIT_DIR:-$PWD}"
+
+while read -r _oldrev newrev refname; do
+  case "$refname" in
+    refs/heads/*)
+      br="${refname#refs/heads/}"
+      if [[ "$br" != "$DEFAULT_BRANCH" && "$br" != "master" && "$br" != "main" ]]; then
+        echo "[post-receive] ignore $refname"
+        continue
+      fi
+      echo "[post-receive] $refname → work=$WORK → web=$TARGET ($newrev)"
+      mkdir -p "$WORK" "$TARGET"
+      git --git-dir="$GITDIR" --work-tree="$WORK" checkout -f "$br"
+      if command -v rsync >/dev/null 2>&1; then
+        rsync -a --delete --exclude .git "$WORK"/ "$TARGET"/
+      else
+        # fallback: copy file-by-file
+        find "$TARGET" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} + 2>/dev/null || true
+        cp -a "$WORK"/. "$TARGET"/
+      fi
+      chmod -R g+rwX "$TARGET" 2>/dev/null || true
+      echo "[post-receive] OK → $TARGET"
+      ls -la "$TARGET" || true
+      ;;
+    *)
+      echo "[post-receive] ignore $refname"
+      ;;
+  esac
+done

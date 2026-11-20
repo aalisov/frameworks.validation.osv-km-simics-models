@@ -232,6 +232,7 @@ install_board_with_vsip() {
   local board_py="$board_dir/km_universal_board_comp.py"
   local patch="$REPO_ROOT/patches/0001-km-universal-board-comp-VSIP-P3T1755.patch"
   local patch2="$REPO_ROOT/patches/0002-km-universal-board-comp-VSIP-memsink.patch"
+  local patch3="$REPO_ROOT/patches/0003-km-universal-board-comp-fpga-rams.patch"
   local src=""
 
   [[ -f "$patch" ]] || die "missing board patch: $patch"
@@ -279,8 +280,9 @@ install_board_with_vsip() {
 
   if [[ -f "$board_py" && $FORCE -eq 0 ]] \
        && grep -q 'create_vsip_memsrc' "$board_py" 2>/dev/null \
-       && grep -q 'create_vsip_memsink' "$board_py" 2>/dev/null; then
-    info "OK  board already has create_vsip_memsrc + create_vsip_memsink"
+       && grep -q 'create_vsip_memsink' "$board_py" 2>/dev/null \
+       && grep -q 'create_fpga_rams' "$board_py" 2>/dev/null; then
+    info "OK  board already has VSIP + create_fpga_rams"
     return 0
   fi
   if [[ -f "$board_py" && $FORCE -eq 1 ]]; then
@@ -309,7 +311,19 @@ install_board_with_vsip() {
       info "WARNING: patch 0002 failed — wire manually via simmod.vsip_memsink.board_hooks"
     fi
   fi
-  info "Board: VSIP+P3T1755 hooks present"
+
+  # 0001 (7350) already includes fpga_rams; 0003 is for boards that only have VSIP.
+  if grep -q 'create_fpga_rams' "$board_py" 2>/dev/null; then
+    info "OK  board already has create_fpga_rams"
+  elif [[ -f "$patch3" ]]; then
+    info "Applying $patch3"
+    if (cd "$board_dir" && patch -p1 < "$patch3"); then
+      info "Board: create_fpga_rams present"
+    else
+      info "WARNING: patch 0003 (fpga_rams) failed — apply manually"
+    fi
+  fi
+  info "Board: VSIP+P3T1755+fpga_rams hooks present"
 }
 
 if [[ $DO_BUILD -eq 1 && $DO_MODELS -eq 1 ]]; then

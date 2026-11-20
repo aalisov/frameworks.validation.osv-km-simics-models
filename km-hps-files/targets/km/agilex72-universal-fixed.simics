@@ -1,0 +1,3 @@
+# Compatibility shim: agilex72 name → agilex27 platform (intel-fpga-main.7350).
+# Prefer targets/km/agilex27-universal-fixed.simics in new scripts.
+run-command-file (sim->project + "/targets/km/agilex27-universal-fixed.simics")

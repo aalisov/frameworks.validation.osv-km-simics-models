@@ -103,7 +103,32 @@ if (lookup-file $bl31_bin -query) {
 
 $sd_image_filename0 = $sd_image
 
-run-command-file (sim->project + "/targets/km/agilex72-universal-fixed.simics")
+# USB mass-storage for U-Boot usb.scr (gate): board disks are empty raw RAM
+# disks unless we load FAT images. Superfloppy FAT → fatls usb N:0.
+if not defined usb3_image_filename {
+    $usb3_image_filename = $project_dir + "/images/usb/km-usb-fat-128m.img"
+}
+if not defined usb3_hs_image_filename {
+    $usb3_hs_image_filename = $project_dir + "/images/usb/km-usb-fat-hs-256m.img"
+}
+if $usb3_image_filename != "" {
+    if not (lookup-file $usb3_image_filename -query) {
+        echo "WARNING: USB3 FAT image missing: %s (usb.scr will FAIL)" % $usb3_image_filename
+        $usb3_image_filename = ""
+    } else {
+        $usb3_image_filename = (lookup-file $usb3_image_filename)
+    }
+}
+if $usb3_hs_image_filename != "" {
+    if not (lookup-file $usb3_hs_image_filename -query) {
+        echo "WARNING: USB3-HS FAT image missing: %s (usb.scr will FAIL)" % $usb3_hs_image_filename
+        $usb3_hs_image_filename = ""
+    } else {
+        $usb3_hs_image_filename = (lookup-file $usb3_hs_image_filename)
+    }
+}
+
+run-command-file (sim->project + "/targets/km/agilex27-universal-fixed.simics")
 
 # CI: auto-continue + clear I2C if "Device in Reset" critical would drop to simics>
 @import os
@@ -129,8 +154,9 @@ $hps.apu.phys_mem.load-file $spl_bin 0x0
 psel $hps.apu.mpu.cores[0]
 penable
 enable-debugger
-load-file $ssbl_image 0x82000000
-load-file $dtb_image 0x88000000
+# Load via phys_mem — bare load-file uses cpu_mem, which has nothing at 0x82xx_xxxx
+$hps.apu.phys_mem.load-file $ssbl_image 0x82000000
+$hps.apu.phys_mem.load-file $dtb_image 0x88000000
 
 if not defined stop_at_uboot { $stop_at_uboot = FALSE }
 # uboot_menu=TRUE: interrupt autoboot and run U-Boot bootmenu (QSPI/SD/USB/net)

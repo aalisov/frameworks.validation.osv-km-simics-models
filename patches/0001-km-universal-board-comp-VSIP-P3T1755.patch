@@ -9,9 +9,9 @@
  
  from comp import (
      EthernetLinkDownConnector,
-@@ -98,6 +98,16 @@
+@@ -125,6 +125,41 @@
      ):
-         """Power state for core 3"""
+         """Initial image to load into the on-chip memory"""
  
 +    class create_vsip_memsrc(
 +        SimpleConfigAttribute(True, "b", simics.Sim_Attr_Optional)
@@ -23,10 +23,35 @@
 +    ):
 +        """Base address for VSIP mem_source MMIO (KM LWSOC2NOC)."""
 +
++    class create_vsip_memsrc2(
++        SimpleConfigAttribute(True, "b", simics.Sim_Attr_Optional)
++    ):
++        """Second VSIP mem_source at 0x181C0000."""
++
++    class vsip_memsrc2_base(
++        SimpleConfigAttribute(0x181C0000, "i", simics.Sim_Attr_Optional)
++    ):
++        """Base address for second VSIP mem_source MMIO."""
++
++    class create_vsip_memsink(
++        SimpleConfigAttribute(True, "b", simics.Sim_Attr_Optional)
++    ):
++        """Instantiate VSIP mem_sink (ctl@0x18190000, tgt@0x40000000)."""
++
++    class vsip_memsink_ctl_base(
++        SimpleConfigAttribute(0x18190000, "i", simics.Sim_Attr_Optional)
++    ):
++        """Base address for VSIP mem_sink control MMIO."""
++
++    class vsip_memsink_tgt_base(
++        SimpleConfigAttribute(0x40000000, "i", simics.Sim_Attr_Optional)
++    ):
++        """Base address for VSIP mem_sink H2F target window."""
++
      ########################################################################
      # Component methods
      ######################################################################
-@@ -374,6 +384,26 @@
+@@ -407,6 +442,38 @@
          self.add_component(
              "i3c0_device3", "i3c_device_comp", [["pid", 0xFB1122330003], ["dcr", 0xE3]]
          )
@@ -36,24 +61,36 @@
 +                "vsip_memsrc_comp",
 +                [["base_addr", self.vsip_memsrc_base.val]],
 +            )
-+
++        if self.create_vsip_memsrc2.val:
++            self.add_component(
++                "vsip_memsrc_1",
++                "vsip_memsrc_comp",
++                [["base_addr", self.vsip_memsrc2_base.val]],
++            )
++        if self.create_vsip_memsink.val:
++            self.add_component(
++                "vsip_memsink_0",
++                "vsip_memsink_comp",
++                [
++                    ["base_addr", self.vsip_memsink_ctl_base.val],
++                    ["target_addr", self.vsip_memsink_tgt_base.val],
++                ],
++            )
 +        # Minimal P3T1755-compatible temp sensor (I3C0)
 +        self.add_component(
 +            "p3t1755_0",
 +            "p3t1755_comp",
 +            [
-+                # Match osbv-i3c0dev-nxp1755 DT: sensor@0,236152A0090
-+                # and i3cdev I3C_DEVICE(0x11B, 0x152a) + board extra 0x090
 +                ["pid", 0x236152A0090],
 +                ["dcr", 0x63],
-+                ["static_address", 0xFF],  # no static addr (DT reg=<0x0 ...>)
++                ["static_address", 0xFF],
 +                ["temperature_c", 25],
 +            ],
 +        )
          self.add_component(
              "i3c1_device1", "i3c_device_comp", [["pid", 0xFB1122550001], ["dcr", 0xC6]]
          )
-@@ -406,6 +436,10 @@
+@@ -439,6 +506,10 @@
              self.get_slot("i3c0_device3.bus_slot"),
          )
          self.connect(
@@ -64,17 +101,33 @@
              self.get_slot("i3c_bus[0].i2c_dev_slot[0]"),
              self.get_slot("eeprom_8b_i2c0.i2c_slot0"),
          )
-@@ -579,3 +613,38 @@
+@@ -612,3 +683,29 @@
              self.get_slot("gpio_loopback.gpio_lb_out15"),
              self.get_slot("fpga.gpio_in1[20]"),
          )
 +
 +    class component(StandardComponent.component):
 +        def post_instantiate(self):
-+            # CPU path is cpu_mem→bt_mem→CCU (NS bit 63). phys_mem-only maps
-+            # never see supersmasher stores (fault @ 0x80000000_1818xxxx).
-+            if not self._up.create_vsip_memsrc.val:
-+                return
-+            from simmod.vsip_memsrc.board_hooks import wire_vsip_memsrc
++            # CPU path is cpu_mem→bt_mem→CCU (NS bit 63). Use board_hooks.
++            if self._up.create_vsip_memsrc.val:
++                from simmod.vsip_memsrc.board_hooks import wire_vsip_memsrc
 +
-+            wire_vsip_memsrc(self._up, base=self._up.vsip_memsrc_base.val)
++                wire_vsip_memsrc(self._up, base=self._up.vsip_memsrc_base.val)
++
++            if self._up.create_vsip_memsrc2.val:
++                from simmod.vsip_memsrc.board_hooks import wire_vsip_memsrc
++
++                wire_vsip_memsrc(
++                    self._up,
++                    base=self._up.vsip_memsrc2_base.val,
++                    slot="vsip_memsrc_1",
++                )
++
++            if self._up.create_vsip_memsink.val:
++                from simmod.vsip_memsink.board_hooks import wire_vsip_memsink
++
++                wire_vsip_memsink(
++                    self._up,
++                    ctl_base=self._up.vsip_memsink_ctl_base.val,
++                    tgt_base=self._up.vsip_memsink_tgt_base.val,
++                )

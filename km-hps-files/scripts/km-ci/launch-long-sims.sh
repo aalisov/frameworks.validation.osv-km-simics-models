@@ -102,6 +102,8 @@ start_one() {
   mkdir -p "$BASE/$id"
   echo "[long] starting $id instance=$inst telnet=$telnet ssh=$ssh_port → $*" >&2
   (
+    # Drop agent flock FD if inherited from run-once (else Simics holds agent.lock forever)
+    exec 9>&- 2>/dev/null || true
     cd "$KM_HPS"
     export SIMICS_INSTANCE="$inst"
     export TELNET_PORT="$telnet"

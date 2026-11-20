@@ -9,7 +9,7 @@
  
  from comp import (
      EthernetLinkDownConnector,
-@@ -125,6 +125,41 @@
+@@ -125,6 +125,69 @@
      ):
          """Initial image to load into the on-chip memory"""
  
@@ -48,10 +48,38 @@
 +    ):
 +        """Base address for VSIP mem_sink H2F target window."""
 +
++    class create_fpga_rams(
++        SimpleConfigAttribute(True, "b", simics.Sim_Attr_Optional)
++    ):
++        """Add plain RAM behind the SOC2NOC (h2f) and LWSOC2NOC (lwh2f) windows, used as
++        DMA / supersmasher targets (mapped on the CPU path bt_mem/phys_mem and carved/appended into the DMA address maps) (cfg names h2f-mem@<base>, lwh2f-mem@<base>). They sit
++        clear of the VSIPs (memsink tgt 0x40000000+0x4000, VSIP pages 0x18180000-0x181CFFFF).
++        OCRAM needs no entry: the KM model already has it at 0x0, 0x80000 (KM_Address_Map 0.8)."""
++
++    class h2f_ram_base(
++        SimpleConfigAttribute(0x40010000, "i", simics.Sim_Attr_Optional)
++    ):
++        """Base of the h2f RAM (SOC2NOC window 0x40000000-0x7fffffff)."""
++
++    class h2f_ram_size(
++        SimpleConfigAttribute(0x40000, "i", simics.Sim_Attr_Optional)
++    ):
++        """Size of the h2f RAM."""
++
++    class lwh2f_ram_base(
++        SimpleConfigAttribute(0x18100000, "i", simics.Sim_Attr_Optional)
++    ):
++        """Base of the lwh2f RAM (LWSOC2NOC window 0x18000000-0x3fffffff)."""
++
++    class lwh2f_ram_size(
++        SimpleConfigAttribute(0x40000, "i", simics.Sim_Attr_Optional)
++    ):
++        """Size of the lwh2f RAM."""
++
      ########################################################################
      # Component methods
      ######################################################################
-@@ -407,6 +442,38 @@
+@@ -407,6 +470,38 @@
          self.add_component(
              "i3c0_device3", "i3c_device_comp", [["pid", 0xFB1122330003], ["dcr", 0xE3]]
          )
@@ -90,7 +118,7 @@
          self.add_component(
              "i3c1_device1", "i3c_device_comp", [["pid", 0xFB1122550001], ["dcr", 0xC6]]
          )
-@@ -439,6 +506,10 @@
+@@ -439,6 +534,10 @@
              self.get_slot("i3c0_device3.bus_slot"),
          )
          self.connect(
@@ -101,7 +129,7 @@
              self.get_slot("i3c_bus[0].i2c_dev_slot[0]"),
              self.get_slot("eeprom_8b_i2c0.i2c_slot0"),
          )
-@@ -612,3 +683,29 @@
+@@ -612,3 +711,130 @@
              self.get_slot("gpio_loopback.gpio_lb_out15"),
              self.get_slot("fpga.gpio_in1[20]"),
          )
@@ -131,3 +159,104 @@
 +                    ctl_base=self._up.vsip_memsink_ctl_base.val,
 +                    tgt_base=self._up.vsip_memsink_tgt_base.val,
 +                )
++
++            if self._up.create_fpga_rams.val:
++                # Plain RAM behind the SOC2NOC / LWSOC2NOC windows. The stock model has several
++                # independent address maps, each with its own FPGA-side window, so the same RAM
++                # objects (shared storage) are put into every view:
++                #   bt_mem, phys_mem      CPU cores (cpu -> bt_mem -> bt -> dsu_noc) and the F2/debug
++                #                         view. Same mechanism as the VSIP board_hooks: Secure and
++                #                         Non-Secure (bit 63) aliases appended to the map. Carving
++                #                         the all_ccu_ranges.map window leaves is NOT enough: the
++                #                         core path (dsu_noc translators) does not end there.
++                #   lsp2hsp.map           LSP masters, i.e. the DMA controllers (their FPGA windows
++                #                         are error stubs, DMA to them ends in a decode error)
++                #   mnoc_noc2soc.map      HSP NoC masters / SMMU physical memory (no FPGA window)
++                # In lsp2hsp the window leaf is split around the RAM; the noc2soc map has no such
++                # leaf, so the RAM is simply appended.
++                # The VSIPs are already mapped (bt_mem and phys_mem) by the board_hooks above, so
++                # the overlap check reads their entries back from those two spaces.
++                NS = 1 << 63
++                seg = "fpga.hps.hsp.noc.segment."
++                split_spaces = (
++                    ("lsp2hsp", self._up.get_slot(seg + "lsp2hsp.map")),
++                )
++                noc2soc = self._up.get_slot(seg + "mnoc_noc2soc.map")
++                vsip_maps = (
++                    self._up.get_slot("fpga.hps.apu.bt_mem"),
++                    self._up.get_slot("fpga.hps.apu.phys_mem"),
++                )
++
++                def carve(space, rbase, rsize, ram):
++                    rend = rbase + rsize
++                    entries = [list(e) for e in space.map]
++                    hosts = [
++                        e for e in entries
++                        if e[1] is not None and e[4]
++                        and e[0] <= rbase and rend <= e[0] + e[4]
++                    ]
++                    if len(hosts) != 1:
++                        return False
++                    host = hosts[0]
++                    hb, hl, hoff = host[0], host[4], host[3]
++                    pieces = []
++                    if rbase > hb:
++                        lo = list(host)
++                        lo[4] = rbase - hb
++                        pieces.append(lo)
++                    mid = list(host)
++                    mid[0], mid[1], mid[3], mid[4] = rbase, ram, 0, rsize
++                    pieces.append(mid)
++                    if rend < hb + hl:
++                        hi = list(host)
++                        hi[0], hi[3], hi[4] = rend, hoff + (rend - hb), hb + hl - rend
++                        pieces.append(hi)
++                    space.map = [x for e in entries for x in (pieces if e is host else [e])]
++                    return True
++
++                for nm, rbase, rsize in (
++                    ("h2f", self._up.h2f_ram_base.val, self._up.h2f_ram_size.val),
++                    ("lwh2f", self._up.lwh2f_ram_base.val, self._up.lwh2f_ram_size.val),
++                ):
++                    rend = rbase + rsize
++                    if any(
++                        e[4] and rbase < e[0] + e[4] and e[0] < rend
++                        for sp in vsip_maps
++                        for e in sp.map
++                    ):
++                        simics.SIM_log_info(
++                            1, self._up.obj, 0,
++                            f"{nm} RAM 0x{rbase:x}+0x{rsize:x} overlaps a VSIP; not added",
++                        )
++                        continue
++                    img = simics.SIM_create_object(
++                        "image", f"km_{nm}_ram_image", [["size", rsize]]
++                    )
++                    ram = simics.SIM_create_object("ram", f"km_{nm}_ram", [["image", img]])
++                    done = []
++                    for label, sp in zip(("bt_mem", "phys_mem"), vsip_maps):
++                        sp.map = [list(e) for e in sp.map] + [
++                            [rbase, ram, 0, 0, rsize],
++                            [rbase | NS, ram, 0, 0, rsize],
++                        ]
++                        done.append(label)
++                    for label, sp in split_spaces:
++                        if carve(sp, rbase, rsize, ram):
++                            done.append(label)
++                        else:
++                            simics.SIM_log_info(
++                                1, self._up.obj, 0,
++                                f"{nm} RAM: no single window in {label}.map, not added there",
++                            )
++                    if any(e[4] and rbase < e[0] + e[4] and e[0] < rend for e in noc2soc.map):
++                        simics.SIM_log_info(
++                            1, self._up.obj, 0,
++                            f"{nm} RAM overlaps the noc2soc map, not added there",
++                        )
++                    else:
++                        noc2soc.map = [list(e) for e in noc2soc.map] + [[rbase, ram, 0, 0, rsize]]
++                        done.append("noc2soc")
++                    simics.SIM_log_info(
++                        3, self._up.obj, 0,
++                        f"Mapped {nm} RAM at 0x{rbase:x} (size 0x{rsize:x}) in: {', '.join(done)}",
++                    )

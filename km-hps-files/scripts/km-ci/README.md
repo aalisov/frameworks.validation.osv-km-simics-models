@@ -118,6 +118,32 @@ Launcher always probes PID+telnet and records `var/last-long-status.txt`
 
 USBIP (C) needs host-side vudc — see `docs/KM-SIMICS-USBIP.md`.
 
+### Watchdog (auto-restart)
+
+[`watch-long-sims.sh`](watch-long-sims.sh) probes each catalog instance’s UART:
+
+- **DOWN** — telnet refused / no process  
+- **UNHEALTHY** — panic / Synchronous Abort / no expected prompt  
+- **OK** — U-Boot prompt (A) or Linux login/shell (B/C); during boot grace, no-panic is enough for Linux
+
+On failure it stops that instance, restarts it (default **3** attempts), then marks
+**UNAVAILABLE** and emails + publishes runs. Skips ticks while `run-once` holds
+`agent.lock`.
+
+```bash
+# One check (safe from cron):
+./scripts/km-ci/watch-long-sims.sh
+
+# Foreground loop:
+./scripts/km-ci/watch-long-sims.sh --loop
+
+# Cron every 5 minutes:
+*/5 * * * *  $HOME/km-hps/scripts/km-ci/watch-long-sims.sh >>$HOME/km-hps/var/watch-long.log 2>&1
+```
+
+State: `var/long-watch/{A,B,C}.{state,retries,reason}`.  
+Clear UNAVAILABLE: `rm var/long-watch/B.state var/long-watch/B.retries`.
+
 ## Email
 
 [`notify.sh`](notify.sh) sends via Altera SMTP (`smtp.altera.com:587`):

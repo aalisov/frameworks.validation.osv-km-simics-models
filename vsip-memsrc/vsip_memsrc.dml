@@ -299,7 +299,13 @@ method on_config_write(uint32 val) {
         execute_vectors();
 }
 
-bank control {
+/*
+ * Control regs only through 0x4c (vsipmemsrc.h). The MMIO window is 16 KiB
+ * (vsip_memsrc_comp.py). Guest memcpy/probes can touch +0x50..; default DML
+ * unmapped_* throws and stops the sim — RAZ/WI like RTL holes.
+ */
+bank control is miss_pattern_bank {
+    param miss_pattern = 0;
     param register_size = REG_DW;
     param byte_order = "little-endian";
 
@@ -396,7 +402,9 @@ bank vectors {
     }
 }
 
-bank errors {
+/* Error log is only ERR_TOTAL DWs; rest of 16 KiB window is RAZ/WI. */
+bank errors is miss_pattern_bank {
+    param miss_pattern = 0;
     param register_size = REG_DW;
     param byte_order = "little-endian";
 

@@ -36,6 +36,7 @@ constant CONF_SEQUENTIAL = 1 << 4;
 constant OPREAD  = 0;
 constant OPWRITE = 1;
 constant OPRDmWR = 2;
+constant OPWRBURST = 3;
 
 connect f2_mem is map_target {
     param documentation = "AXI master target memory space (F2 / soc2fpga)";
@@ -110,10 +111,31 @@ method clear_errors() {
         err_storage[i] = 0;
 }
 
-method beat_count() -> (int) {
-    /* One 256-bit (32-byte) beat per vector data chunk; default 1 beat. */
-    local int awlen = burst_reg & 0xffff;
-    return awlen + 1;
+/*
+ * Burst length, xlen register 0x2c. RTL: mem_source_wr takes wlen[7:0],
+ * mem_source_rd takes rlen from [31:24]. Beats = len + 1, 256 bit (32 B) each.
+ */
+method wr_beat_count() -> (int) {
+    return cast(burst_reg & 0xff, int) + 1;
+}
+
+method rd_beat_count() -> (int) {
+    return cast((burst_reg >> 24) & 0xff, int) + 1;
+}
+
+/*
+ * A vector holds 16 data dwords = 512 bit = 2 beats of 256 bit. A burst of N
+ * beats takes its data (or expected data) from ceil(N / 2) consecutive
+ * vectors. The address comes from the first vector.
+ */
+constant BEATS_PER_VEC = 2;
+
+method vecs_for_beats(int beats) -> (int) {
+    return (beats + BEATS_PER_VEC - 1) / BEATS_PER_VEC;
+}
+
+method clamp_vec(int idx) -> (int) {
+    return idx >= NUM_V ? NUM_V - 1 : idx;
 }
 
 method vec_addr(int idx) -> (uint64) {
@@ -130,17 +152,19 @@ method vec_len(int idx) -> (uint32) {
     return vec_get(idx, 18);
 }
 
-method do_write_beat(uint64 addr, int idx) {
+/* Returns the number of vectors the burst consumed. */
+method do_write_burst(uint64 addr, int idx) -> (int) {
     local int b;
-    local int beats = beat_count();
+    local int beats = wr_beat_count();
     local uint8 buf[32];
     /* One AW handshake per burst; one W handshake per beat. */
     pv_awvalid_cnt++;
     for (b = 0; b < beats; b++) {
-        local int base_dw = b * 8;
+        local int vi = clamp_vec(idx + b / BEATS_PER_VEC);
+        local int base_dw = (b % BEATS_PER_VEC) * 8;
         local int w;
         for (w = 0; w < 8; w++) {
-            local uint32 v = vec_get(idx, base_dw + w);
+            local uint32 v = vec_get(vi, base_dw + w);
             buf[w * 4 + 0] = v & 0xff;
             buf[w * 4 + 1] = (v >> 8) & 0xff;
             buf[w * 4 + 2] = (v >> 16) & 0xff;
@@ -152,61 +176,71 @@ method do_write_beat(uint64 addr, int idx) {
         } catch {
             if ((config_reg & CONF_ERR) != 0) {
                 errored = true;
-                log_error(idx, true, 1);
+                log_error(vi, true, 1);
             }
         }
     }
+    return vecs_for_beats(beats);
 }
 
-method do_read_beat(uint64 addr, int idx) {
+/* Returns the number of vectors the burst consumed. */
+method do_read_burst(uint64 addr, int idx) -> (int) {
     local int b;
-    local int beats = beat_count();
+    local int beats = rd_beat_count();
     local uint8 buf[32];
     /* One AR handshake per burst; one R handshake per beat. */
     pv_arvalid_cnt++;
     for (b = 0; b < beats; b++) {
-        local int base_dw = b * 8;
+        local int vi = clamp_vec(idx + b / BEATS_PER_VEC);
+        local int base_dw = (b % BEATS_PER_VEC) * 8;
         local int w;
         try {
             f2_mem.read_bytes(addr + cast(b * 32, uint64), 32, buf);
         } catch {
             if ((config_reg & CONF_ERR) != 0) {
                 errored = true;
-                log_error(idx, false, 1);
+                log_error(vi, false, 1);
             }
-            return;
+            return vecs_for_beats(beats);
         }
         pv_rvalid_cnt++;
         if ((config_reg & CONF_ERR) == 0)
             continue;
         for (w = 0; w < 8; w++) {
-            local uint32 expect = vec_get(idx, base_dw + w);
+            local uint32 expect = vec_get(vi, base_dw + w);
             local uint32 got = buf[w * 4]
                 | (cast(buf[w * 4 + 1], uint32) << 8)
                 | (cast(buf[w * 4 + 2], uint32) << 16)
                 | (cast(buf[w * 4 + 3], uint32) << 24);
             if (expect != got) {
                 errored = true;
-                log_error(idx, false, 2);
+                log_error(vi, false, 2);
             }
         }
     }
+    return vecs_for_beats(beats);
 }
 
-method run_vector(int idx) {
+/* Returns the number of vectors consumed (1 for bursts of up to 2 beats). */
+method run_vector(int idx) -> (int) {
     local uint64 addr = vec_addr(idx);
     local uint32 op = vec_opcode(idx);
+    local int used = 1;
+    local int n;
     cur_index = cast(idx, uint32);
     log info, 4: "VSIP memsrc vector %d op=%d addr=0x%x", idx, op, addr;
-    if (op == OPWRITE) {
-        do_write_beat(addr, idx);
+    if (op == OPWRITE || op == OPWRBURST) {
+        used = do_write_burst(addr, idx);
     } else if (op == OPREAD) {
-        do_read_beat(addr, idx);
+        used = do_read_burst(addr, idx);
     } else if (op == OPRDmWR) {
-        do_read_beat(addr, idx);
-        do_write_beat(addr, idx);
+        used = do_read_burst(addr, idx);
+        n = do_write_burst(addr, idx);
+        if (n > used)
+            used = n;
     }
-    pv_cycle_cnt += delay_cycles + 1;
+    pv_cycle_cnt += (delay_cycles + 1) * cast(used, uint32);
+    return used;
 }
 
 method finish_run() {
@@ -222,6 +256,7 @@ method execute_vectors() {
     local int v;
     local int last = cast(num_vectors, int);
 
+    log info, 2: "VSIP memsrc start: xlen=0x%x wlen=%d rlen=%d vectors=%d loops=%d", burst_reg, wr_beat_count() - 1, rd_beat_count() - 1, num_vectors, num_loops;
     running = true;
     test_done = false;
     end_of_array = false;
@@ -245,8 +280,11 @@ method execute_vectors() {
         loops = 1000000;
 
     for (loop = 0; loop < loops; loop++) {
-        for (v = 0; v <= last; v++)
-            run_vector(v);
+        v = 0;
+        while (v <= last) {
+            local int used = run_vector(v);
+            v += used;
+        }
         loop_count = cast(loop + 1, uint32);
         if ((config_reg & CONF_STOP) != 0 && errored)
             break;
